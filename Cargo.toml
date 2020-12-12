@@ -1,0 +1,14 @@
+[package]
+name = "celestium"
+version = "0.1.0"
+authors = ["Jens Hegner Stærmose <jhs@artificialmind.ai>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+openssl = "0.10.31"
+openssl-sys = "0.9.59"
+
+[profile.release]
+debug = true
