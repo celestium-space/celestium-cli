@@ -1,9 +1,12 @@
-use celestium::transaction::{TransactionBlock, TransactionBlockTrait};
+use celestium::block::{Block, BlockHash};
+use celestium::block_id::BlockId;
+use celestium::serialize::Serialize;
+use celestium::transaction::{Transaction, TransactionBlock, TransactionValue};
 use openssl::ec::EcKey;
 // use openssl::nid::Nid;
 use openssl::pkey::Public;
 use std::fs::File;
-// use std::io::prelude::*;
+use std::io::prelude::*;
 use std::io::Read;
 use std::str;
 
@@ -28,33 +31,55 @@ fn main() {
     // }
     //let transaction = Transaction();
 
-    let pk1_1 = load_public_key_from_file("keys/key1.pub");
-    let pk2_1 = load_public_key_from_file("keys/key2.pub");
-    //let pk1_2 = load_public_key_from_file("keys/key1.pub");
-    //let pk2_2 = load_public_key_from_file("keys/key2.pub");
-    let value = 42;
-    let mut buffer1 = tmp_serialize(1, pk1_1, value, pk2_1);
-    //let mut buffer2 = tmp_serialize(2, pk2_2, value, pk1_2);
-    let mut buffer = Vec::new();
-    buffer.append(&mut buffer1);
-    //buffer.append(&mut buffer2);
-    let mut trans: TransactionBlock = TransactionBlockTrait::new(buffer.to_vec());
-    trans.sign("keys/key1");
-    //trans.sign("keys/key2");
-    println!("{:?}", trans.verify());
-}
+    // Create transactions and save to file
+    let transaction1 = Transaction::new(
+        BlockId::new(true, false, 0x341),
+        load_public_key_from_file("keys/key1.pub"),
+        load_public_key_from_file("keys/key2.pub"),
+        TransactionValue::new(-1, None),
+    );
+    let transaction2 = Transaction::new(
+        BlockId::new(false, false, 0x341),
+        load_public_key_from_file("keys/key2.pub"),
+        load_public_key_from_file("keys/key1.pub"),
+        TransactionValue::new(-1, None),
+    );
+    let mut transaction_block: TransactionBlock =
+        TransactionBlock::new(vec![transaction1, transaction2], 2);
+    transaction_block.sign("keys/key1");
+    transaction_block.sign("keys/key2");
+    let mut block = Block::new(
+        vec![transaction_block],
+        BlockHash::new(0),
+        load_public_key_from_file("keys/key1.pub"),
+        vec![0x13, 0x37],
+    );
+    let binary_file_name = "celestium.bin";
+    let mut f = File::create(binary_file_name).unwrap();
+    match block.serialize() {
+        Ok(_) => {
+            println!(
+                "Block created from parameters and verified, saving to {}",
+                binary_file_name
+            );
 
-fn tmp_serialize(bid: i16, from_pk: EcKey<Public>, value: u32, to_pk: EcKey<Public>) -> Vec<u8> {
-    let mut buffer: [u8; 189] = [0; 189];
-    buffer[0] = (bid >> 8) as u8;
-    buffer[1] = bid as u8;
-    buffer[2..93].clone_from_slice(&mut from_pk.public_key_to_der().unwrap());
-    buffer[94] = (value >> 24) as u8;
-    buffer[95] = (value >> 16) as u8;
-    buffer[96] = (value >> 8) as u8;
-    buffer[97] = value as u8;
-    buffer[98..189].clone_from_slice(&mut to_pk.public_key_to_der().unwrap());
-    return buffer.to_vec();
+            f.write_all(&block.serialize().unwrap()).unwrap();
+            drop(f);
+
+            // Load transactions from file
+            let buffer: &mut Vec<u8> = &mut Vec::new();
+            let binary_file_name = "celestium.bin";
+            let mut f = File::open(binary_file_name).unwrap();
+            f.read_to_end(buffer).unwrap();
+            let mut block = Block::from_serialized(buffer);
+
+            match block.serialize() {
+                Ok(b) => println!("Block loaded from binary and verified! Good job! {:?}", b),
+                Err(e) => println!("Block load error: {}", e),
+            }
+        }
+        Err(e) => println!("Block creation error: {}", e),
+    }
 }
 
 fn load_public_key_from_file(public_key_file_location: &str) -> EcKey<Public> {

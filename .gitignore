@@ -12,3 +12,4 @@ Cargo.lock
 
 # Project specific files and folders
 keys/
+**/*.bin
