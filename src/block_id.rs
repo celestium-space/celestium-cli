@@ -39,12 +39,12 @@ impl fmt::Display for BlockId {
 }
 
 impl Serialize for BlockId {
-    fn from_serialized(data: &[u8]) -> BlockId {
-        BlockId {
+    fn from_serialized(data: &[u8]) -> Result<Box<BlockId>, String> {
+        Ok(Box::new(BlockId {
             is_continuation: data[0] & 0x80 > 0,
             is_magic: data[0] & 0x40 > 0,
             value: (((data[0] & 0x7) as u16) << 8) + data[1] as u16,
-        }
+        }))
     }
     fn serialize_into(&mut self, buffer: &mut [u8]) -> Result<Vec<u8>, String> {
         match &self.serialize() {
@@ -65,5 +65,9 @@ impl Serialize for BlockId {
             first_byte ^= 0x40;
         }
         return Ok(vec![first_byte, (self.value & 0xff) as u8]);
+    }
+
+    fn serialized_len(&mut self) -> Result<usize, String> {
+        Ok(2)
     }
 }
