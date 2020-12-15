@@ -33,7 +33,7 @@ impl Serialize for Blockchain {
         let mut hash = BlockHash::new(0);
         let mut tmp_blocks = Vec::new();
         while i < data.len() {
-            let mut block = *Block::from_serialized(&data[i..])?;
+            let block = *Block::from_serialized(&data[i..])?;
             if block.back_hash == hash {
                 let block_len = block.serialized_len()?;
                 hash = *BlockHash::from_serialized(&sha256(&data[i..i + block_len]))?;
@@ -75,9 +75,9 @@ impl Serialize for Blockchain {
         todo!()
     }
 
-    fn serialized_len(&mut self) -> Result<usize, String> {
+    fn serialized_len(&self) -> Result<usize, String> {
         let mut tmp_len = 0usize;
-        for block in self.blocks.iter_mut() {
+        for block in &self.blocks {
             tmp_len += block.serialized_len()?;
         }
         return Ok(tmp_len);

@@ -1,15 +1,15 @@
 use crate::serialize::Serialize;
 use std::fmt;
 
-pub struct BlockId {
+pub struct UserId {
     is_continuation: bool,
     is_magic: bool,
     value: u16,
 }
 
-impl BlockId {
-    pub fn new(is_continuation: bool, is_magic: bool, value: u16) -> BlockId {
-        BlockId {
+impl UserId {
+    pub fn new(is_continuation: bool, is_magic: bool, value: u16) -> UserId {
+        UserId {
             is_continuation: is_continuation,
             is_magic: is_magic,
             value: value,
@@ -23,27 +23,20 @@ impl BlockId {
     pub fn is_magic(&self) -> bool {
         self.is_magic
     }
-
-    pub fn get_magic_len(&self) -> Result<u16, String> {
-        if !self.is_magic {
-            return Err(String::from("Not finders fee BlockId"));
-        }
-        return Ok(self.value as u16 & 0x3fff);
-    }
 }
 
-impl fmt::Display for BlockId {
+impl fmt::Display for UserId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "BID:{}", self.value)
     }
 }
 
-impl Serialize for BlockId {
-    fn from_serialized(data: &[u8]) -> Result<Box<BlockId>, String> {
-        Ok(Box::new(BlockId {
+impl Serialize for UserId {
+    fn from_serialized(data: &[u8]) -> Result<Box<UserId>, String> {
+        Ok(Box::new(UserId {
             is_continuation: data[0] & 0x80 > 0,
-            is_magic: data[0] & 0x40 > 0,
-            value: (((data[0] & 0x7) as u16) << 8) + data[1] as u16,
+            is_magic: data[0] == 0xef && data[1] == 0xff,
+            value: (((data[0] & 0x7f) as u16) << 8) + data[1] as u16,
         }))
     }
     fn serialize_into(&mut self, buffer: &mut [u8]) -> Result<Vec<u8>, String> {
@@ -57,17 +50,17 @@ impl Serialize for BlockId {
         }
     }
     fn serialize(&mut self) -> Result<Vec<u8>, String> {
+        if self.is_magic {
+            return Ok(vec![0xef, 0xff]);
+        }
         let mut first_byte = (self.value >> 8) as u8;
         if self.is_continuation {
             first_byte ^= 0x80;
         }
-        if self.is_magic {
-            first_byte ^= 0x40;
-        }
         return Ok(vec![first_byte, (self.value & 0xff) as u8]);
     }
 
-    fn serialized_len(&mut self) -> Result<usize, String> {
+    fn serialized_len(&self) -> Result<usize, String> {
         Ok(2)
     }
 }

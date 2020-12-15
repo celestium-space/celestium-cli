@@ -1,6 +1,6 @@
-use crate::block_id::BlockId;
 use crate::serialize::Serialize;
 use crate::transaction::TransactionBlock;
+use crate::user_id::UserId;
 use openssl::ec::EcKey;
 use openssl::pkey::Public;
 use std::fmt;
@@ -57,14 +57,14 @@ impl Serialize for BlockHash {
         return Ok(serialized);
     }
 
-    fn serialized_len(&mut self) -> Result<usize, String> {
+    fn serialized_len(&self) -> Result<usize, String> {
         return Ok(4);
     }
 }
 
 pub struct Block {
     transaction_blocks: Vec<TransactionBlock>,
-    bid: BlockId,
+    uid: UserId,
     pub back_hash: BlockHash,
     pub finder: EcKey<Public>,
     pub magic: Vec<u8>,
@@ -73,14 +73,14 @@ pub struct Block {
 impl Block {
     pub fn new(
         transactions: Vec<TransactionBlock>,
-        bid: BlockId,
+        uid: UserId,
         back_hash: BlockHash,
         finder: EcKey<Public>,
         magic: Vec<u8>,
     ) -> Block {
         Block {
             transaction_blocks: transactions,
-            bid,
+            uid,
             back_hash,
             finder,
             magic,
@@ -100,25 +100,31 @@ impl Serialize for Block {
     fn from_serialized(data: &[u8]) -> Result<Box<Block>, String> {
         let mut transactions = Vec::new();
         let mut i = 0;
-        let mut bid;
+        let mut uid;
         loop {
-            bid = *BlockId::from_serialized(&data[i..])?;
-            if !bid.is_magic() {
+            uid = *UserId::from_serialized(&data[i..])?;
+            if !uid.is_magic() {
                 let transaction = *TransactionBlock::from_serialized(&data[i..])?;
                 transactions.push(transaction);
                 i += transactions.last().unwrap().len();
             } else {
-                i += 2;
                 break;
             }
         }
-        let magic_len = bid.get_magic_len()?;
+        i += uid.serialized_len()?;
+        let magic_len = data[i];
+        i += 1;
+        let back_hash = *BlockHash::from_serialized(&data[i..])?;
+        i += back_hash.serialized_len()?;
+        let finder = EcKey::public_key_from_der(&data[i..]).unwrap();
+        i += finder.serialized_len()?;
+        let magic = data[i..i + magic_len as usize].to_vec();
         return Ok(Box::new(Block {
             transaction_blocks: transactions,
-            back_hash: *BlockHash::from_serialized(&data[i..i + 4])?,
-            finder: EcKey::public_key_from_der(&data[i + 4..i + 95]).unwrap(),
-            bid,
-            magic: data[i + 95..i + 95 + magic_len as usize].to_vec(),
+            back_hash: back_hash,
+            finder: finder,
+            uid,
+            magic: magic,
         }));
     }
 
@@ -129,10 +135,11 @@ impl Serialize for Block {
         }
 
         serialized.append(
-            &mut BlockId::new(false, true, self.magic.len() as u16)
+            &mut UserId::new(false, true, self.magic.len() as u16)
                 .serialize()
                 .unwrap(),
         );
+        serialized.append(&mut vec![self.magic.len() as u8]);
         serialized.append(&mut self.back_hash.serialize().unwrap());
         serialized.append(&mut self.finder.public_key_to_der().unwrap());
         serialized.append(&mut self.magic);
@@ -143,12 +150,17 @@ impl Serialize for Block {
         todo!()
     }
 
-    fn serialized_len(&mut self) -> Result<usize, String> {
+    fn serialized_len(&self) -> Result<usize, String> {
         let mut tmp_len = 0usize;
-        for transaction_block in self.transaction_blocks.iter_mut() {
+        for transaction_block in &self.transaction_blocks {
             tmp_len += transaction_block.serialized_len()?;
         }
-        let len = tmp_len + self.bid.serialized_len()? + 4 + 91 + self.magic.len();
+        let len = tmp_len
+            + self.uid.serialized_len()?
+            + 1
+            + 4
+            + self.finder.serialized_len()?
+            + self.magic.len();
         return Ok(len);
     }
 }
