@@ -3,14 +3,16 @@ use celestium::{
     blockchain::Blockchain,
     serialize::Serialize,
     transaction::{Transaction, TransactionBlock, TransactionValue},
-    user_id::UserId,
+    universal_id::UniversalId,
+    user::User,
     wallet::Wallet,
 };
 use rand::rngs::OsRng;
 use secp256k1::Secp256k1;
 use std::{
+    collections::HashMap,
     fs::{self, File},
-    io::{self, Write},
+    io::{self, prelude::*, Write},
     path::PathBuf,
 };
 use structopt::StructOpt;
@@ -29,21 +31,29 @@ struct Cli {
 
 fn main() {
     let args = Cli::from_args();
-    match args.blockchain_path {
-        Some(bp) => {
-            if bp.exists() {
-                match Wallet::from_binary(bp, args.pk_path, args.sk_path) {
-                    Ok(_) => loop {
+    match (args.blockchain_path, args.pk_path, args.sk_path) {
+        (Some(bc_path), Some(pk_path), Some(sk_path)) => {
+            if bc_path.exists() && pk_path.exists() && sk_path.exists() {
+                let mut file = File::open(bc_path).unwrap();
+                let mut bp_bin = vec![];
+                file.read_to_end(&mut bp_bin).unwrap();
+                file = File::open(pk_path).unwrap();
+                let mut pk_bin = vec![];
+                file.read_to_end(&mut pk_bin).unwrap();
+                file = File::open(sk_path).unwrap();
+                let mut sk_bin = vec![];
+                file.read_to_end(&mut sk_bin).unwrap();
+                match Wallet::from_binary(bp_bin, pk_bin, sk_bin) {
+                    Ok(mut w) => loop {
                         let mut input = String::new();
                         match io::stdin().read_line(&mut input) {
                             Ok(_) => {
                                 let command = String::from(input.trim());
                                 if command == String::from("balance") {
-                                    todo!();
-                                // match w.get_balance() {
-                                //     Ok(b) => println!("User balance: {}", b),
-                                //     Err(e) => println!("Error while getting balance: {}", e),
-                                // }
+                                    match w.get_balance() {
+                                        Ok(b) => println!("User balance: {}", b),
+                                        Err(e) => println!("Error while getting balance: {}", e),
+                                    }
                                 } else if command == String::from("exit") {
                                     break;
                                 } else {
@@ -56,12 +66,12 @@ fn main() {
                     Err(e) => println!("Could not load blockchain: {}", e),
                 }
             } else {
-                println!("Blockchain file doesn't exist, want to generate a test file? (y/N)");
+                println!("Blockchain, public key or secret key file doesn't exist, want to generate a test file? (y/N)");
                 generate_test_binary();
             }
         }
-        None => {
-            println!("Blockchain file argument not supplied, want to generate a test file? (y/N)");
+        _ => {
+            println!("Blockchain, public key or secret key file arguments not supplied, want to generate a test file? (y/N)");
             generate_test_binary();
         }
     }
@@ -104,41 +114,68 @@ fn create_test_blockchain(location: String) {
     }
 
     let transaction1 = Transaction::new(
-        UserId::new(true, false, 0x341),
+        UniversalId::new(false, false, 0),
         Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
-        TransactionValue::new(400, Some(10)),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        TransactionValue::new(10000, Some(0)),
     );
     let transaction2 = Transaction::new(
-        UserId::new(false, false, 0x341),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
+        UniversalId::new(true, false, 1),
         Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
         TransactionValue::new(500, Some(25)),
     );
-
-    println!(
-        "T1+T2 serialized len: {}",
-        transaction1.serialized_len().unwrap() + transaction2.serialized_len().unwrap()
+    let transaction3 = Transaction::new(
+        UniversalId::new(false, false, 2),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
+        TransactionValue::new(200, Some(10)),
     );
-    let mut transaction_block: TransactionBlock =
-        TransactionBlock::new(vec![transaction1, transaction2], 2);
-
-    transaction_block.sign(PathBuf::from(sk1_location));
-    transaction_block.sign(PathBuf::from(sk2_location));
-
-    println!(
-        "TB serialized len: {}",
-        transaction_block.serialized_len().unwrap()
+    let transaction4 = Transaction::new(
+        UniversalId::new(false, false, 3),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
+        TransactionValue::new(500, Some(25)),
+    );
+    let transaction5 = Transaction::new(
+        UniversalId::new(false, false, 4),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
+        TransactionValue::new(1000, Some(30)),
     );
 
-    let block = Block::new(
-        vec![transaction_block],
-        UserId::new(false, true, 2),
+    let mut transaction_block1: TransactionBlock = TransactionBlock::new(vec![transaction1], 1);
+    let mut transaction_block2: TransactionBlock =
+        TransactionBlock::new(vec![transaction2, transaction3], 1);
+    let mut transaction_block3: TransactionBlock = TransactionBlock::new(vec![transaction4], 1);
+    let mut transaction_block4: TransactionBlock = TransactionBlock::new(vec![transaction5], 1);
+
+    transaction_block1.sign(PathBuf::from(sk1_location));
+    transaction_block2.sign(PathBuf::from(sk1_location));
+    transaction_block3.sign(PathBuf::from(sk1_location));
+    transaction_block4.sign(PathBuf::from(sk1_location));
+
+    let block0 = Block::new(
+        vec![transaction_block1],
+        UniversalId::new(false, true, 2),
         BlockHash::new(0),
         Wallet::load_public_key_from_file(&&PathBuf::from(pk1_location)).unwrap(),
         vec![0x13, 0x37],
     );
-    let mut blockchain = Blockchain::new(vec![block]);
+    let block1 = Block::new(
+        vec![transaction_block2, transaction_block3, transaction_block4],
+        UniversalId::new(false, true, 4),
+        BlockHash::new(0x60dc7ca4),
+        Wallet::load_public_key_from_file(&&PathBuf::from(pk1_location)).unwrap(),
+        vec![0x41, 0x41, 0x41, 0x41],
+    );
+    let mut users = HashMap::new();
+    users.insert(
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        User::new(Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap()),
+    );
+
+    let mut blockchain = Blockchain::new(vec![block0, block1], users);
 
     // Serialize and save blockchain to file
     let mut serialized = [0; 1000];
