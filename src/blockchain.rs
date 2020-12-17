@@ -1,8 +1,10 @@
 use crate::block::{Block, BlockHash};
 use crate::serialize::Serialize;
+use crate::user::User;
 use sha2::{Digest, Sha256};
 
 pub struct Blockchain {
+    users: Vec<User>,
     blocks: Vec<Block>,
 }
 
