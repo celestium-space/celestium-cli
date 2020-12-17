@@ -6,14 +6,11 @@ use celestium::{
     user_id::UserId,
     wallet::Wallet,
 };
-use openssl::{
-    ec::{EcGroup, EcKey},
-    nid::Nid,
-};
+use rand::rngs::OsRng;
+use secp256k1::Secp256k1;
 use std::{
-    fs::{create_dir, File},
-    io,
-    io::Write,
+    fs::{self, File},
+    io::{self, Write},
     path::PathBuf,
 };
 use structopt::StructOpt;
@@ -36,16 +33,17 @@ fn main() {
         Some(bp) => {
             if bp.exists() {
                 match Wallet::from_binary(bp, args.pk_path, args.sk_path) {
-                    Ok(mut w) => loop {
+                    Ok(_) => loop {
                         let mut input = String::new();
                         match io::stdin().read_line(&mut input) {
                             Ok(_) => {
                                 let command = String::from(input.trim());
                                 if command == String::from("balance") {
-                                    match w.get_balance() {
-                                        Ok(b) => println!("User balance: {}", b),
-                                        Err(e) => println!("Error while getting balance: {}", e),
-                                    }
+                                    todo!();
+                                // match w.get_balance() {
+                                //     Ok(b) => println!("User balance: {}", b),
+                                //     Err(e) => println!("Error while getting balance: {}", e),
+                                // }
                                 } else if command == String::from("exit") {
                                     break;
                                 } else {
@@ -95,7 +93,7 @@ fn create_test_blockchain(location: String) {
     let sk2_location = "keys/key2";
 
     if !PathBuf::from("keys").exists() {
-        create_dir("keys").unwrap();
+        fs::create_dir("keys").unwrap();
     }
 
     if !PathBuf::from(pk1_location).exists() || !PathBuf::from(sk1_location).exists() {
@@ -107,39 +105,53 @@ fn create_test_blockchain(location: String) {
 
     let transaction1 = Transaction::new(
         UserId::new(true, false, 0x341),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
         TransactionValue::new(400, Some(10)),
     );
     let transaction2 = Transaction::new(
         UserId::new(false, false, 0x341),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)),
-        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk2_location)).unwrap(),
+        Wallet::load_public_key_from_file(&PathBuf::from(pk1_location)).unwrap(),
         TransactionValue::new(500, Some(25)),
+    );
+
+    println!(
+        "T1+T2 serialized len: {}",
+        transaction1.serialized_len().unwrap() + transaction2.serialized_len().unwrap()
     );
     let mut transaction_block: TransactionBlock =
         TransactionBlock::new(vec![transaction1, transaction2], 2);
+
     transaction_block.sign(PathBuf::from(sk1_location));
     transaction_block.sign(PathBuf::from(sk2_location));
+
+    println!(
+        "TB serialized len: {}",
+        transaction_block.serialized_len().unwrap()
+    );
+
     let block = Block::new(
         vec![transaction_block],
         UserId::new(false, true, 2),
         BlockHash::new(0),
-        Wallet::load_public_key_from_file(&&PathBuf::from(pk1_location)),
+        Wallet::load_public_key_from_file(&&PathBuf::from(pk1_location)).unwrap(),
         vec![0x13, 0x37],
     );
     let mut blockchain = Blockchain::new(vec![block]);
 
     // Serialize and save blockchain to file
-    match blockchain.serialize() {
-        Ok(data) => {
+    let mut serialized = [0; 1000];
+    let mut i = 0;
+    match blockchain.serialize_into(&mut serialized, &mut i) {
+        Ok(_) => {
             println!(
                 "Block created from parameters and verified, saving to '{}'",
                 location
             );
 
             let mut f = File::create(location).unwrap();
-            f.write_all(data.as_slice()).unwrap();
+            f.write_all(&serialized[0..i].to_vec()).unwrap();
             drop(f);
         }
         Err(e) => println!("Block creation error: {}", e),
@@ -147,15 +159,11 @@ fn create_test_blockchain(location: String) {
 }
 
 fn generate_ec_keys(pk_file_location: PathBuf, sk_file_location: PathBuf) {
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-    let key = EcKey::generate(&group).unwrap();
-    let mut pk_file = File::create(pk_file_location).unwrap();
+    let secp = Secp256k1::new();
+    let mut rng = OsRng::new().expect("OsRng");
+    let (sk, pk) = secp.generate_keypair(&mut rng);
     let mut sk_file = File::create(sk_file_location).unwrap();
-    pk_file
-        .write_all(key.public_key_to_pem().unwrap().as_slice())
-        .unwrap();
-    sk_file
-        .write_all(key.private_key_to_pem().unwrap().as_slice())
-        .unwrap();
-    return;
+    sk_file.write_all(sk.as_ref()).unwrap();
+    let mut pk_file = File::create(pk_file_location).unwrap();
+    pk_file.write_all(&pk.serialize()).unwrap();
 }

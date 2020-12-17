@@ -1,8 +1,7 @@
 use crate::serialize::Serialize;
 use crate::user_id::UserId;
-use openssl::ec::EcKey;
-use openssl::ecdsa::EcdsaSig;
-use openssl::pkey::Public;
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, Signature};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::{io::prelude::*, path::PathBuf};
 
@@ -58,79 +57,120 @@ impl TransactionValue {
 }
 
 impl Serialize for TransactionValue {
-    fn from_serialized(data: &[u8]) -> Result<Box<TransactionValue>, String> {
-        let mut tmp_val = ((data[0] as i32) << 24)
-            + ((data[1] as i32) << 16)
-            + ((data[2] as i32) << 8)
-            + (data[3] as i32);
+    fn from_serialized(data: &[u8], i: &mut usize) -> Result<Box<TransactionValue>, String> {
+        let mut tmp_val = ((data[*i] as i32) << 24)
+            + ((data[*i + 1] as i32) << 16)
+            + ((data[*i + 2] as i32) << 8)
+            + (data[*i + 3] as i32);
         let mut tmp_fee = None;
         if tmp_val >= 0 {
             tmp_fee = Some((tmp_val & 0xff) as u8);
             tmp_val = tmp_val >> 8;
         }
-        Ok(Box::new(TransactionValue {
+        let transaction_value = TransactionValue {
             value: tmp_val,
             fee: tmp_fee,
-        }))
+        };
+        *i += transaction_value.serialized_len()?;
+        Ok(Box::new(transaction_value))
     }
-    fn serialize_into(&mut self, buffer: &mut [u8]) -> Result<Vec<u8>, String> {
-        match self.serialize() {
-            Ok(s) => {
-                buffer[0] = s[0];
-                buffer[1] = s[1];
-                buffer[2] = s[2];
-                buffer[3] = s[3];
-                return Ok(s);
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn serialize(&mut self) -> Result<Vec<u8>, String> {
-        let mut buffer = [0; 4];
+    fn serialize_into(&mut self, buffer: &mut [u8], i: &mut usize) -> Result<usize, String> {
         let mut tmp_val = self.value;
         if tmp_val >= 0 {
             tmp_val = (tmp_val << 8) + (self.get_fee()? as i32);
         }
-        buffer[0] = (tmp_val >> 24) as u8;
-        buffer[1] = (tmp_val >> 16) as u8;
-        buffer[2] = (tmp_val >> 8) as u8;
-        buffer[3] = tmp_val as u8;
-        return Ok(buffer[0..4].to_vec());
+        buffer[*i] = (tmp_val >> 24) as u8;
+        buffer[*i + 1] = (tmp_val >> 16) as u8;
+        buffer[*i + 2] = (tmp_val >> 8) as u8;
+        buffer[*i + 3] = tmp_val as u8;
+        *i += 4;
+        return Ok(4);
     }
+
+    // fn my_serialize(&mut self) -> Result<Vec<u8>, String> {
+    //     let mut buffer = [0; 4];
+    //     let mut tmp_val = self.value;
+    //     if tmp_val >= 0 {
+    //         tmp_val = (tmp_val << 8) + (self.get_fee()? as i32);
+    //     }
+    //     buffer[0] = (tmp_val >> 24) as u8;
+    //     buffer[1] = (tmp_val >> 16) as u8;
+    //     buffer[2] = (tmp_val >> 8) as u8;
+    //     buffer[3] = tmp_val as u8;
+    //     return Ok(buffer[0..4].to_vec());
+    // }
 
     fn serialized_len(&self) -> Result<usize, String> {
         Ok(4)
     }
 }
 
-impl Serialize for EcKey<Public> {
-    fn from_serialized(_: &[u8]) -> Result<Box<EcKey<Public>>, String> {
-        todo!();
+impl Serialize for PublicKey {
+    fn from_serialized(data: &[u8], i: &mut usize) -> Result<Box<PublicKey>, String> {
+        match PublicKey::from_slice(&data[*i..*i + 33]) {
+            Ok(public_key) => {
+                *i += public_key.serialized_len()?;
+                return Ok(Box::new(public_key));
+            }
+            Err(e) => Err(format!(
+                "Could not deserialize public key {:x?}: {}",
+                &data[*i..*i + 33],
+                e.to_string()
+            )),
+        }
     }
-    fn serialize_into(&mut self, _: &mut [u8]) -> Result<Vec<u8>, String> {
-        todo!();
-    }
-    fn serialize(&mut self) -> Result<Vec<u8>, String> {
-        todo!();
+
+    fn serialize_into(&mut self, buffer: &mut [u8], i: &mut usize) -> Result<usize, String> {
+        let self_bytes = self.serialize();
+        buffer[*i..*i + self_bytes.len()].copy_from_slice(&self_bytes);
+        *i += self_bytes.len();
+        return Ok(self_bytes.len());
     }
     fn serialized_len(&self) -> Result<usize, String> {
-        Ok(91)
+        Ok(self.serialize().len())
     }
 }
 
+impl Serialize for SecretKey {
+    fn from_serialized(secret_key: &[u8], i: &mut usize) -> Result<Box<SecretKey>, String> {
+        match SecretKey::from_slice(secret_key) {
+            Ok(secret_key) => {
+                *i += secret_key.len();
+                return Ok(Box::new(secret_key));
+            }
+            Err(e) => Err(format!(
+                "Could not deserialize secret key {:?}: {}",
+                secret_key,
+                e.to_string()
+            )),
+        }
+    }
+
+    fn serialize_into(&mut self, buffer: &mut [u8], i: &mut usize) -> Result<usize, String> {
+        let self_bytes = self.as_ref();
+        buffer.copy_from_slice(self_bytes);
+        *i += self_bytes.len();
+        return Ok(self_bytes.len());
+    }
+    // fn my_serialize(&mut self) -> Result<Vec<u8>, String> {
+    //     Ok(self.as_ref().to_vec())
+    // }
+    fn serialized_len(&self) -> Result<usize, String> {
+        Ok(self.as_ref().len())
+    }
+}
 pub struct Transaction {
     uid: UserId,
-    from_pk: EcKey<Public>,
-    to_pk: EcKey<Public>,
+    from_pk: PublicKey,
+    to_pk: PublicKey,
     value: TransactionValue,
 }
 
 impl Transaction {
     pub fn new(
         uid: UserId,
-        from_pk: EcKey<Public>,
-        to_pk: EcKey<Public>,
+        from_pk: PublicKey,
+        to_pk: PublicKey,
         value: TransactionValue,
     ) -> Transaction {
         Transaction {
@@ -143,20 +183,48 @@ impl Transaction {
 }
 
 impl Serialize for Transaction {
-    fn from_serialized(_: &[u8]) -> Result<Box<Self>, String> {
-        todo!()
+    fn from_serialized(data: &[u8], mut i: &mut usize) -> Result<Box<Self>, String> {
+        let user_id = *UserId::from_serialized(&data, &mut i)?;
+        let from_pk = *PublicKey::from_serialized(&data, i).unwrap();
+        let to_pk = *PublicKey::from_serialized(&data, i).unwrap();
+        let value = *TransactionValue::from_serialized(&data, i)?;
+        return Ok(Box::new(Transaction {
+            uid: user_id,
+            from_pk: from_pk,
+            to_pk: to_pk,
+            value: value,
+        }));
     }
 
-    fn serialize(&mut self) -> Result<Vec<u8>, String> {
-        todo!()
-    }
+    // fn my_serialize(&mut self) -> Result<Vec<u8>, String> {
+    //     //todo!();
+    //     let mut return_buffer = Vec::new();
+    //     return_buffer.append(&mut self.uid.my_serialize()?);
+    //     let mut from_pk_data = self.from_pk.serialize().to_vec();
+    //     return_buffer.append(&mut from_pk_data);
+    //     return_buffer.append(&mut self.to_pk.serialize().to_vec());
+    //     return_buffer.append(&mut self.value.my_serialize()?);
+    //     return Ok(return_buffer);
+    // }
 
-    fn serialize_into(&mut self, _: &mut [u8]) -> Result<Vec<u8>, String> {
-        todo!()
+    fn serialize_into(
+        &mut self,
+        mut buffer: &mut [u8],
+        mut i: &mut usize,
+    ) -> Result<usize, String> {
+        let start_i = *i;
+        self.uid.serialize_into(&mut buffer, i)?;
+        self.from_pk.serialize_into(&mut buffer, &mut i)?;
+        self.to_pk.serialize_into(&mut buffer, &mut i)?;
+        self.value.serialize_into(&mut buffer, &mut i)?;
+        return Ok(*i - start_i);
     }
 
     fn serialized_len(&self) -> Result<usize, String> {
-        let transaction_len = self.uid.serialized_len()? + 91 + 91 + self.value.serialized_len()?;
+        let transaction_len = self.uid.serialized_len()?
+            + self.from_pk.serialized_len()?
+            + self.to_pk.serialized_len()?
+            + self.value.serialized_len()?;
         Ok(transaction_len)
     }
 }
@@ -164,7 +232,7 @@ impl Serialize for Transaction {
 pub struct TransactionBlock {
     pub transactions: Vec<Transaction>,
     pub expected_signatures: usize,
-    pub signatures: Vec<Vec<u8>>,
+    pub signatures: Vec<Signature>,
 }
 
 impl TransactionBlock {
@@ -176,18 +244,15 @@ impl TransactionBlock {
         }
     }
 
-    pub fn get_user_value_change(&mut self, pk: &mut EcKey<Public>) -> Result<i32, String> {
+    pub fn get_user_value_change(&mut self, pk: &mut PublicKey) -> Result<i32, String> {
         let mut tmp_value = 0;
-        for transaction in &self.transactions {
+        for transaction in self.transactions.iter_mut() {
             if transaction.value.is_coin_transfer()? {
                 let transaction_value = transaction.value.get_value()? as i32;
-                if pk.public_key_to_der().unwrap()
-                    == transaction.from_pk.public_key_to_der().unwrap()
-                {
+                if pk == &mut transaction.from_pk {
                     tmp_value -= transaction_value;
                 }
-                if pk.public_key_to_der().unwrap() == transaction.to_pk.public_key_to_der().unwrap()
-                {
+                if pk == &mut transaction.to_pk {
                     tmp_value += transaction_value;
                 }
             }
@@ -203,60 +268,57 @@ impl TransactionBlock {
         let mut f = File::open(sk_file_location).unwrap();
         let mut buffer = Vec::new();
         f.read_to_end(&mut buffer).unwrap();
-        let ec_key = EcKey::private_key_from_pem(buffer.as_slice()).unwrap();
+        let secp = Secp256k1::new();
+        let mut i = 0;
+        let sk = *SecretKey::from_serialized(buffer.as_slice(), &mut i).unwrap();
         let bytes = &self.serialize_content().unwrap();
-        self.signatures.push(
-            EcdsaSig::sign(bytes, ec_key.as_ref())
-                .unwrap()
-                .to_der()
-                .unwrap()
-                .to_vec(),
-        );
+        let message = Message::from_slice(Sha256::digest(bytes).as_slice()).unwrap();
+        self.signatures.push(secp.sign(&message, &sk));
     }
 
     fn serialize_content(&mut self) -> Result<Vec<u8>, String> {
-        let mut return_buffer: Vec<u8> = Vec::new();
-        for transaction in self.transactions.iter_mut() {
-            let mut buffer: [u8; 188] = [0; 188];
-            transaction.uid.serialize_into(&mut buffer)?;
-            buffer[2..93].clone_from_slice(&mut transaction.from_pk.public_key_to_der().unwrap());
-            buffer[93..184].clone_from_slice(&mut transaction.to_pk.public_key_to_der().unwrap());
-            transaction.value.serialize_into(&mut buffer[184..188])?;
-            return_buffer.append(&mut buffer.to_vec());
+        if self.transactions.len() > 0 {
+            let mut return_buffer =
+                vec![0; self.transactions.len() * self.transactions[0].serialized_len()?];
+            let mut i = 0;
+            for transaction in self.transactions.iter_mut() {
+                transaction.serialize_into(&mut return_buffer, &mut i)?;
+            }
+            return Ok(return_buffer);
         }
-        return Ok(return_buffer);
+        return Ok(Vec::new());
     }
 }
 
 impl Serialize for TransactionBlock {
-    fn from_serialized(data: &[u8]) -> Result<Box<TransactionBlock>, String> {
-        let mut i = 0;
+    fn from_serialized(data: &[u8], i: &mut usize) -> Result<Box<TransactionBlock>, String> {
         let mut transactions = Vec::new();
         let mut seen_pks = Vec::new();
         loop {
-            let user_id = *UserId::from_serialized(&data[i..])?;
-            i += user_id.serialized_len()?;
-            let from_pk = EcKey::public_key_from_der(&data[i..]).unwrap();
-            let from_pk_len = from_pk.serialized_len()?;
-            let from_pk_data = &data[i..i + from_pk_len];
-            i += from_pk_len;
-            let to_pk = EcKey::public_key_from_der(&data[i..]).unwrap();
-            i += to_pk.serialized_len()?;
-            let value = *TransactionValue::from_serialized(&data[i..])?;
-            i += value.serialized_len()?;
-            let transaction = Transaction::new(user_id, from_pk, to_pk, value);
+            let transaction = *Transaction::from_serialized(&data, i)?;
+            let from_pk = transaction.from_pk;
             transactions.push(transaction);
-            if !seen_pks.contains(&from_pk_data) {
-                seen_pks.push(from_pk_data);
+            if !seen_pks.contains(&from_pk) {
+                seen_pks.push(from_pk);
             }
             if !transactions.last().unwrap().uid.is_continuation() {
                 break;
             }
         }
-        let mut tmp_signatures: Vec<Vec<u8>> = Vec::new();
-        for _ in 0..seen_pks.len() {
-            tmp_signatures.push(data[i..i + 72].to_vec());
-            i += 72;
+        let mut tmp_signatures: Vec<Signature> = Vec::new();
+        for _ in seen_pks.iter() {
+            match Signature::from_compact(&data[*i..*i + 64].to_vec()) {
+                Ok(signature) => {
+                    tmp_signatures.push(signature);
+                    *i += signature.serialize_compact().len();
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Could not deserialize signatrue: {}",
+                        e.to_string()
+                    ))
+                }
+            }
         }
         Ok(Box::new(TransactionBlock {
             transactions: transactions,
@@ -265,7 +327,56 @@ impl Serialize for TransactionBlock {
         }))
     }
 
-    fn serialize(&mut self) -> Result<Vec<u8>, String> {
+    // fn my_serialize(&mut self) -> Result<Vec<u8>, String> {
+    //     if self.expected_signatures != self.signatures.len() {
+    //         return Err(format!(
+    //             "Wrong amount of signatures; expected {} got {}",
+    //             self.expected_signatures,
+    //             self.signatures.len()
+    //         ));
+    //     }
+    //     match self.serialize_content() {
+    //         Ok(mut serialized) => {
+    //             let mut seen_pks: Vec<PublicKey> = Vec::new();
+    //             for transaction in &self.transactions {
+    //                 if seen_pks.contains(&transaction.from_pk) {
+    //                     continue;
+    //                 }
+    //                 if seen_pks.len() > self.signatures.len() {
+    //                     return Err(format!(
+    //                         "Too few signatures, missing signature for transaction {} at least",
+    //                         transaction.uid,
+    //                     ));
+    //                 }
+    //                 let bytes = serialized.as_slice();
+    //                 match Message::from_slice(Sha256::digest(bytes).as_slice()) {
+    //                     Ok(message) => {
+    //                         let signature = self.signatures[seen_pks.len()];
+    //                         let secp = Secp256k1::new();
+    //                         if !secp
+    //                             .verify(&message, &signature, &transaction.from_pk)
+    //                             .is_ok()
+    //                         {
+    //                             return Err(format!("Signature not valid for {}", transaction.uid));
+    //                         }
+    //                         seen_pks.push(transaction.from_pk);
+    //                     }
+    //                     Err(e) => {
+    //                         return Err(format!("Could not generate message from bytes: {}", e))
+    //                     }
+    //                 }
+    //             }
+    //             for signature in self.signatures.iter() {
+    //                 let vec_sig = signature.serialize_compact();
+    //                 serialized.append(&mut vec_sig.to_vec());
+    //             }
+    //             return Ok(serialized);
+    //         }
+    //         Err(e) => Err(e),
+    //     }
+    // }
+
+    fn serialize_into(&mut self, buffer: &mut [u8], i: &mut usize) -> Result<usize, String> {
         if self.expected_signatures != self.signatures.len() {
             return Err(format!(
                 "Wrong amount of signatures; expected {} got {}",
@@ -273,58 +384,43 @@ impl Serialize for TransactionBlock {
                 self.signatures.len()
             ));
         }
-        match self.serialize_content() {
-            Ok(mut serialized) => {
-                let mut seen_pks: Vec<Vec<u8>> = Vec::new();
-                for transaction in &self.transactions {
-                    if seen_pks.contains(&transaction.from_pk.public_key_to_der().unwrap()) {
-                        continue;
-                    }
-                    if seen_pks.len() > self.signatures.len() {
+        let content_start = *i;
+        let mut seen_pks: Vec<PublicKey> = Vec::new();
+        for transaction in self.transactions.iter_mut() {
+            transaction.serialize_into(buffer, i)?;
+            if !seen_pks.contains(&transaction.from_pk) {
+                seen_pks.push(transaction.from_pk);
+            }
+        }
+        let content_end = *i;
+        if seen_pks.len() != self.signatures.len() {
+            return Err(format!(
+                "Wrong amount of signatures on transaction, expected {} got {}",
+                seen_pks.len(),
+                self.signatures.len()
+            ));
+        }
+        match Message::from_slice(Sha256::digest(&buffer[content_start..content_end]).as_slice()) {
+            Ok(message) => {
+                for (j, signature) in self.signatures.iter().enumerate() {
+                    let secp = Secp256k1::new();
+                    if secp
+                        .verify(&message, &signature, &self.transactions[j].from_pk)
+                        .is_err()
+                    {
                         return Err(format!(
-                            "Too few signatures, missing signature for transaction {} at least",
-                            transaction.uid,
+                            "Signature not valid for {}",
+                            self.transactions[j].uid
                         ));
                     }
-                    let signature = &self.signatures[seen_pks.len()];
-                    let bytes = serialized.as_slice();
-                    let verifier = EcdsaSig::from_der(signature).unwrap();
-                    if !verifier
-                        .verify(bytes, transaction.from_pk.as_ref())
-                        .unwrap()
-                    {
-                        return Err(format!("Signature not valid for {}", transaction.uid));
-                    }
-                    seen_pks.push(transaction.from_pk.public_key_to_der().unwrap());
+                    let vec_sig = signature.serialize_compact();
+                    buffer[*i..*i + vec_sig.len()].copy_from_slice(&vec_sig);
+                    *i += vec_sig.len();
                 }
-                for (i, signature) in self.signatures.iter().enumerate() {
-                    if signature.len() > 72 {
-                        return Err(format!("Signature {} too long", i));
-                    }
-                    for j in 0..72 {
-                        if j < signature.len() {
-                            serialized.push(signature[j]);
-                        } else {
-                            serialized.push(0);
-                        }
-                    }
-                }
-                return Ok(serialized);
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(format!("Could not generate message from bytes: {}", e)),
         }
-    }
-
-    fn serialize_into(&mut self, buffer: &mut [u8]) -> Result<Vec<u8>, String> {
-        match self.serialize() {
-            Ok(s) => {
-                for i in 0..s.len() {
-                    buffer[i] = s[i];
-                }
-                return Ok(s);
-            }
-            Err(e) => Err(e),
-        }
+        return Ok(*i - content_start);
     }
 
     fn serialized_len(&self) -> Result<usize, String> {
@@ -332,8 +428,8 @@ impl Serialize for TransactionBlock {
         for transaction in &self.transactions {
             tmp_len += transaction.serialized_len()?;
         }
-        for signature in &self.signatures {
-            tmp_len += signature.len();
+        for signature in self.signatures.iter() {
+            tmp_len += signature.serialize_compact().len();
         }
         return Ok(tmp_len);
     }
