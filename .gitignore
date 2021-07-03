@@ -13,3 +13,6 @@ Cargo.lock
 # Project specific files and folders
 keys/
 **/*.bin
+blocks
+mined_blocks
+random

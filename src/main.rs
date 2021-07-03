@@ -4,6 +4,7 @@ use celestium::{
     serialize::{DynamicSized, Serialize},
     wallet::{Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
 };
+use colored::*;
 use std::fs::OpenOptions;
 use std::{fs::File, io::prelude::*};
 use structopt::StructOpt;
@@ -19,7 +20,7 @@ struct Cli {
 fn main() {
     let args = Cli::from_args();
     if args.command == "generate" {
-        match Wallet::generate_init_blockchain_unmined(10) {
+        match Wallet::generate_init_blockchain_unmined(3) {
             Ok(blocks) => {
                 println!("Generated {} blocks, serializing", blocks.len());
                 let mut blocks_file = OpenOptions::new()
@@ -115,6 +116,35 @@ fn main() {
                     mined_blocks_file
                         .write_all(&serialized_blocks)
                         .expect("Error: Could not write to file");
+                }
+                Err(e) => {
+                    println!("Error opening file: {}", e);
+                }
+            },
+            None => println!("Please provide path to binary serialized block"),
+        }
+    } else if args.command == "test" {
+        match args.serialized_block_location {
+            Some(serialized_block_location) => match File::open(serialized_block_location) {
+                Ok(mut file) => {
+                    let mut serialized_blocks = Vec::new();
+                    file.read_to_end(&mut serialized_blocks).unwrap();
+                    let mut i = 0;
+                    let mut j = 0;
+                    while i < serialized_blocks.len() {
+                        print!("Block {} ", j);
+                        j += 1;
+                        match Block::from_serialized(&serialized_blocks, &mut i) {
+                            Ok(block) => {
+                                if BlockHash::contains_enough_work(&block.hash()) {
+                                    println!("{}", "contains enough work ✔️".green())
+                                } else {
+                                    println!("{}", "does not contain enough work ❌".red())
+                                }
+                            }
+                            Err(s) => println!("{}", s.red()),
+                        };
+                    }
                 }
                 Err(e) => {
                     println!("Error opening file: {}", e);
