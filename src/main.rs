@@ -76,6 +76,10 @@ fn main() {
                     let mut serialized_blocks_len = 0;
                     println!("Found {} blocks, starting mining", blocks_len);
                     for mut block in blocks {
+                        if BlockHash::contains_enough_work(&block.hash()){
+                            println!("Block {}/{} already mined. Skipping", j, blocks_len);
+                            continue;
+                        }
                         print!("Mining block {}/{}", j, blocks_len);
                         j += 1;
                         block.back_hash = back_hash;
@@ -91,31 +95,31 @@ fn main() {
                             None => println!("Got none block"),
                         }
                         println!(". Done");
-                    }
 
-                    i = 0;
-                    j = 0;
-                    let mut serialized_blocks = vec![0u8; serialized_blocks_len];
-                    for block in mined_blocks {
-                        block
-                            .serialize_into(&mut serialized_blocks, &mut i)
-                            .expect(&format!("Error: Could not serialize block {}", j));
-                    }
-                    let file_name = "mined_blocks";
-                    println!(
-                        "All blocks mined, saving {}B to {}",
-                        serialized_blocks_len, file_name
-                    );
-                    let mut mined_blocks_file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .open(file_name)
-                        .expect("Error opening file");
+                        len = 0;
+                        block_n = 0;
+                        let mut serialized_blocks = vec![0u8; serialized_blocks_len];
+                        for i_block in &mined_blocks {
+                            i_block
+                                .serialize_into(&mut serialized_blocks, &mut len)
+                                .expect(&format!("Error: Could not serialize block {}", block_n));
+                        }
+                        let file_name = "blocks";
+                        println!(
+                            "Saving checkpoint ({}B) to {}",
+                            serialized_blocks_len, file_name
+                        );
+                        let mut mined_blocks_file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(file_name)
+                            .expect("Error opening file");
 
-                    mined_blocks_file
-                        .write_all(&serialized_blocks)
-                        .expect("Error: Could not write to file");
+                        mined_blocks_file
+                            .write_all(&serialized_blocks)
+                            .expect("Error: Could not write to file");
+                    }
                 }
                 Err(e) => {
                     println!("Error opening file: {}", e);
