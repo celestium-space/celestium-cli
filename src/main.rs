@@ -8,7 +8,7 @@ use colored::*;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::time::Instant;
-use std::{fs::File, io::prelude::*};
+use std::{fs::remove_file, fs::File, io::prelude::*};
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -25,12 +25,6 @@ fn main() {
         match Wallet::generate_init_blockchain_unmined(10) {
             Ok(blocks) => {
                 println!("Generated {} blocks, serializing", blocks.len());
-                let mut blocks_file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open("blocks")
-                    .expect("Error opening file");
 
                 let mut serialized_blocks_len = 0;
                 for block in &blocks {
@@ -46,9 +40,17 @@ fn main() {
                         .expect(&format!("Error: Could not serialize block {}", j));
                     j += 1;
                 }
-                blocks_file
-                    .write_all(&serialized_blocks)
+                remove_file("blocks")
+                    .unwrap_or_else(|e| println!("Warning: Could not clean file. {}", e));
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open("blocks")
+                    .expect("Error: Could not open file");
+                f.write_all(&serialized_blocks)
                     .expect("Error: Could not write to file");
+                f.flush().expect("Error: Could not flush file");
+                println!("Done.")
             }
             Err(e) => {
                 println!("Error generating blocks: {}", e);
@@ -63,29 +65,36 @@ fn main() {
                     let (pk, sk) = Wallet::generate_ec_keys();
                     let wallet = Wallet::default_miner(pk, sk);
                     let mut unmined_blocks = Vec::default();
-                    let mut unmined_blocks_len = 0;
+                    let mut total_blocks = 0;
                     let mut i = 0;
+                    let mut unmined_serialized_blocks_len = unmined_serialized_blocks.len();
                     while i < unmined_serialized_blocks.len() {
                         match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
                             Ok(block) => unmined_blocks.push(*block),
                             Err(s) => {
-                                println!("Got invalid block: {}", s);
-                                //println!("{:?}", serialized_blocks[i..serialized_blocks.len()]);
+                                println!("Got invalid block at {}. {}", total_blocks, s);
                                 break;
                             }
                         };
-                        unmined_blocks_len += 1;
+                        total_blocks += 1;
                     }
                     let mut back_hash = unmined_blocks[0].back_hash.clone();
                     let mut mined_blocks = Vec::default();
                     let mut mined_serialized_blocks_len = 0;
-                    println!("Found {} blocks, starting mining", unmined_blocks_len);
+                    println!(
+                        "Found {} blocks ({}B), starting mining",
+                        total_blocks,
+                        unmined_serialized_blocks.len()
+                    );
                     for (n, mut block) in unmined_blocks.clone().iter_mut().enumerate() {
                         if BlockHash::contains_enough_work(&block.hash()) {
-                            println!("Block {}/{} already mined. Skipping", n, unmined_blocks_len);
+                            println!(
+                                "{}",
+                                format!("Block {}/{} already mined ✔️", n, total_blocks).green(),
+                            );
                             continue;
                         }
-                        print!("Mining block {}/{}", n, unmined_blocks_len);
+                        print!("Mining block {}/{}", n, total_blocks);
                         io::stdout().flush().unwrap();
                         block.back_hash = back_hash;
                         let block_hash = block.hash();
@@ -96,36 +105,34 @@ fn main() {
                         match mined_block {
                             Some(mined_block) => {
                                 mined_serialized_blocks_len += mined_block.serialized_len();
+                                unmined_serialized_blocks_len -= block.serialized_len();
                                 mined_blocks.push(mined_block);
-                                println!(". Done");
+                                println!("{}", ". Done ✔️".green());
                             }
                             None => println!(". Got none block"),
                         }
                         println!("Time: {:?}", start.elapsed());
 
                         let mut len = 0;
-                        let mut mined_serialized_blocks = vec![0u8; mined_serialized_blocks_len];
+                        let mut all_blocks_serialized =
+                            vec![0u8; mined_serialized_blocks_len + unmined_serialized_blocks_len];
                         for (block_n, i_block) in mined_blocks.iter_mut().enumerate() {
                             i_block
-                                .serialize_into(&mut mined_serialized_blocks, &mut len)
+                                .serialize_into(&mut all_blocks_serialized, &mut len)
                                 .unwrap_or_else(|_| {
                                     panic!("Error: Could not serialize block {}", block_n)
                                 });
                         }
 
-                        let mut unmined_serialized_blocks_len = 0;
-                        for block in unmined_blocks.clone() {
-                            unmined_serialized_blocks_len += block.serialized_len();
-                        }
-
-                        let mut unmined_blocks_serialized =
-                            vec![0u8; unmined_serialized_blocks_len];
-
-                        for (block_n, i_block) in unmined_blocks.iter().enumerate() {
+                        for (block_n, i_block) in unmined_blocks[n + 1..].iter().enumerate() {
                             i_block
-                                .serialize_into(&mut unmined_blocks_serialized, &mut len)
+                                .serialize_into(&mut all_blocks_serialized, &mut len)
                                 .unwrap_or_else(|e| {
-                                    panic!("Error: Could not serialize block {}. {}", block_n, e)
+                                    panic!(
+                                        "Error: Could not serialize block {}. {}",
+                                        n + 1 + block_n,
+                                        e
+                                    )
                                 });
                         }
 
@@ -135,19 +142,14 @@ fn main() {
                             mined_serialized_blocks_len + unmined_serialized_blocks_len,
                             file_name
                         );
-                        let mut mined_blocks_file = OpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .create(true)
-                            .open(file_name)
-                            .expect("Error opening file");
 
-                        mined_blocks_file
-                            .write_all(&mined_serialized_blocks)
+                        let mut f = OpenOptions::new()
+                            .write(true)
+                            .open(file_name)
+                            .expect("Error: Could not open file");
+                        f.write_all(&all_blocks_serialized)
                             .expect("Error: Could not write to file");
-                        mined_blocks_file
-                            .write_all(&unmined_serialized_blocks)
-                            .expect("Error: Could not write to file");
+                        f.flush().expect("Error: Could not flush file");
                     }
                 }
                 Err(e) => {
