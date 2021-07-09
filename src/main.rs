@@ -139,7 +139,7 @@ fn main() {
                                 )
                             });
                     }
-                    remove_file("blocks").unwrap_or_else(|e| {
+                    remove_file(serialized_block_location.clone()).unwrap_or_else(|e| {
                         println!(
                             "Warning: Could not clean \"{:?}\". {}",
                             serialized_block_location.clone(),
