@@ -139,7 +139,13 @@ fn main() {
                                 )
                             });
                     }
-
+                    remove_file("blocks").unwrap_or_else(|e| {
+                        println!(
+                            "Warning: Could not clean \"{:?}\". {}",
+                            serialized_block_location.clone(),
+                            e
+                        )
+                    });
                     println!(
                         "Saving checkpoint ({}B) to {:?}",
                         mined_serialized_blocks_len + unmined_serialized_blocks_len,
@@ -148,6 +154,7 @@ fn main() {
 
                     let mut f = OpenOptions::new()
                         .write(true)
+                        .create(true)
                         .open(serialized_block_location.clone())
                         .unwrap();
                     f.write_all(&all_blocks_serialized).unwrap();
