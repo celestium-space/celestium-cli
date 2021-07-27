@@ -67,7 +67,7 @@ fn main() {
                 file.read_to_end(&mut unmined_serialized_blocks).unwrap();
 
                 let (pk, sk) = Wallet::generate_ec_keys();
-                let wallet = Wallet::default_miner(pk, sk);
+                let wallet = Wallet::new(pk, sk, true);
                 let mut unmined_blocks = Vec::default();
                 let mut total_blocks = 0;
                 let mut i = 0;
