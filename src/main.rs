@@ -33,12 +33,10 @@ fn main() {
 
                 let mut i = 0;
                 let mut serialized_blocks = vec![0u8; serialized_blocks_len];
-                let mut j = 0;
-                for block in blocks {
+                for (j, block) in blocks.into_iter().enumerate() {
                     block
                         .serialize_into(&mut serialized_blocks, &mut i)
-                        .expect(&format!("Error: Could not serialize block {}", j));
-                    j += 1;
+                        .unwrap_or_else(|_| panic!("Error: Could not serialize block {}", j));
                 }
                 remove_file("blocks")
                     .unwrap_or_else(|e| println!("Warning: Could not clean file. {}", e));
@@ -67,7 +65,7 @@ fn main() {
                 file.read_to_end(&mut unmined_serialized_blocks).unwrap();
 
                 let (pk, sk) = Wallet::generate_ec_keys();
-                let wallet = Wallet::new(pk, sk, true);
+                let wallet = Wallet::new(pk, sk, true).unwrap();
                 let mut unmined_blocks = Vec::default();
                 let mut total_blocks = 0;
                 let mut i = 0;
@@ -107,13 +105,13 @@ fn main() {
                         wallet.mine_block(DEFAULT_N_THREADS, DEFAULT_PAR_WORK, block.clone());
                     back_hash = BlockHash::from(block_hash);
                     match mined_block {
-                        Some(mined_block) => {
+                        Ok(mined_block) => {
                             mined_serialized_blocks_len += mined_block.serialized_len();
                             unmined_serialized_blocks_len -= block.serialized_len();
                             mined_blocks.push(mined_block);
                             println!("{}", ". Done ✔️".green());
                         }
-                        None => println!(". Got none block"),
+                        Err(e) => println!(". Got none block. {}", e),
                     }
                     println!("Time: {:?}", start.elapsed());
 
