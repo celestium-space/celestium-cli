@@ -7,8 +7,11 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-structopt = "0.3.21"
+clap = "2.33"
 colored = "2"
+image = "0.23.14"
+num = "0.4.0"
+probability = "0.17.0"
 
 [dependencies.celestium]
 path = "../celestium-lib"
