@@ -84,7 +84,7 @@ fn main() {
                         .serialize_into(&mut serialized_blocks, &mut i)
                         .unwrap_or_else(|_| panic!("Error: Could not serialize block {}", j));
                 }
-                let path = matches.value_of("block").unwrap();
+                let path = matches.value_of("blocks").unwrap();
                 remove_file(path)
                     .unwrap_or_else(|e| println!("Warning: Could not clean file. {}", e));
                 let mut f = OpenOptions::new()
