@@ -42,6 +42,7 @@ fn main() {
         (@subcommand generate =>
             (about: "Generates a new test blockchain")
             (@arg blocks: +required +takes_value -b --blocks "Path to binary blocks file")
+            (@arg count: +required +takes_value -c --count "Amount of unmined blocks to generate")
         )
         (@subcommand random =>
             (about: "Generates random z-vectors from noisy images")
@@ -62,7 +63,12 @@ fn main() {
     .get_matches();
 
     if let Some(matches) = matches.subcommand_matches("generate") {
-        match Wallet::generate_init_blockchain_unmined(10) {
+        match Wallet::generate_init_blockchain_unmined(
+            value_t!(matches.value_of("count"), u128).unwrap_or_else(|e| {
+                println!("Could not convert count param: {}", e);
+                e.exit();
+            }),
+        ) {
             Ok(blocks) => {
                 println!("Generated {} blocks, serializing", blocks.len());
 
