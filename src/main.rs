@@ -251,7 +251,7 @@ fn main() {
                 );
                 continue;
             }
-            print!("Mining block {}/{}", n, total_blocks);
+            print!("Mining block {}/{}", n + 1, total_blocks);
             io::stdout().flush().unwrap();
             block.back_hash = back_hash;
             let block_hash = block.hash();
