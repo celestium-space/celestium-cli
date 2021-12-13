@@ -130,10 +130,6 @@ fn main() {
             vec![(0, 0, 0, 0, 0, 0); image_width * image_height];
         for (y, inner) in all_img_pixels.iter().enumerate() {
             for (x, pixels) in inner.iter().enumerate() {
-                // let mut r_range = (u8::MAX, u8::MIN);
-                // let mut g_range = (u8::MAX, u8::MIN);
-                // let mut b_range = (u8::MAX, u8::MIN);
-                // let mut a_range = (u8::MAX, u8::MIN);
                 let mut r_total_diff = 0;
                 let mut g_total_diff = 0;
                 let mut b_total_diff = 0;
@@ -147,15 +143,7 @@ fn main() {
                             a_total_diff += diff((pixel1.0[3], pixel2.0[3]));
                         }
                     }
-                    // r_range = (min(r_range.0, pixel.0[0]), max(r_range.1, pixel.0[0]));
-                    // g_range = (min(g_range.0, pixel.0[1]), max(g_range.1, pixel.0[1]));
-                    // b_range = (min(b_range.0, pixel.0[2]), max(b_range.1, pixel.0[2]));
-                    // a_range = (min(a_range.0, pixel.0[3]), max(a_range.1, pixel.0[3]));
                 }
-                // let r = diff(r_range);
-                // let g = diff(g_range);
-                // let b = diff(b_range);
-                // let a = 255 - diff(a_range);
                 diffs[x + y * image_width] = (
                     r_total_diff,
                     g_total_diff,
@@ -243,20 +231,17 @@ fn main() {
                 i += 8;
             }
         }
-        println!("[");
         for (x, y) in normalized_diffs[..count]
             .iter()
             .map(|diff| (diff.4, diff.5))
             .collect::<Vec<(u16, u16)>>()
         {
-            println!("[{}, {}],", x, y);
             bin[i] = (x >> 8) as u8;
             bin[i + 1] = (x & 0xff) as u8;
             bin[i + 2] = (y >> 8) as u8;
             bin[i + 3] = (y & 0xff) as u8;
             i += 4;
         }
-        println!("]");
         let output_path = matches.value_of("output").unwrap();
         let mut f = OpenOptions::new()
             .write(true)
