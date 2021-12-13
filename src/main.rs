@@ -27,11 +27,11 @@ macro_rules! unwrap_or_print {
     };
 }
 
-fn diff(r: (u8, u8)) -> u8 {
+fn diff(r: (u8, u8)) -> u32 {
     if r.0 > r.1 {
-        r.0 - r.1
+        (r.0 - r.1) as u32
     } else {
-        r.1 - r.0
+        (r.1 - r.0) as u32
     }
 }
 
@@ -126,47 +126,100 @@ fn main() {
             }
         }
         let mut img = RgbaImage::new(image_width as u32, image_height as u32);
-        let mut diffs: Vec<(u8, u8, u8, u8, u16, u16)> =
+        let mut diffs: Vec<(u32, u32, u32, u32, u16, u16)> =
             vec![(0, 0, 0, 0, 0, 0); image_width * image_height];
         for (y, inner) in all_img_pixels.iter().enumerate() {
             for (x, pixels) in inner.iter().enumerate() {
-                let mut r_range = (u8::MAX, u8::MIN);
-                let mut g_range = (u8::MAX, u8::MIN);
-                let mut b_range = (u8::MAX, u8::MIN);
-                let mut a_range = (u8::MAX, u8::MIN);
-                for pixel in pixels {
-                    r_range = (min(r_range.0, pixel.0[0]), max(r_range.1, pixel.0[0]));
-                    g_range = (min(g_range.0, pixel.0[1]), max(g_range.1, pixel.0[1]));
-                    b_range = (min(b_range.0, pixel.0[2]), max(b_range.1, pixel.0[2]));
-                    a_range = (min(a_range.0, pixel.0[3]), max(a_range.1, pixel.0[3]));
+                // let mut r_range = (u8::MAX, u8::MIN);
+                // let mut g_range = (u8::MAX, u8::MIN);
+                // let mut b_range = (u8::MAX, u8::MIN);
+                // let mut a_range = (u8::MAX, u8::MIN);
+                let mut r_total_diff = 0;
+                let mut g_total_diff = 0;
+                let mut b_total_diff = 0;
+                let mut a_total_diff = 0;
+                for pixel1 in pixels {
+                    for pixel2 in pixels {
+                        if pixel1 != pixel2 {
+                            r_total_diff += diff((pixel1.0[0], pixel2.0[0]));
+                            g_total_diff += diff((pixel1.0[1], pixel2.0[1]));
+                            b_total_diff += diff((pixel1.0[2], pixel2.0[2]));
+                            a_total_diff += diff((pixel1.0[3], pixel2.0[3]));
+                        }
+                    }
+                    // r_range = (min(r_range.0, pixel.0[0]), max(r_range.1, pixel.0[0]));
+                    // g_range = (min(g_range.0, pixel.0[1]), max(g_range.1, pixel.0[1]));
+                    // b_range = (min(b_range.0, pixel.0[2]), max(b_range.1, pixel.0[2]));
+                    // a_range = (min(a_range.0, pixel.0[3]), max(a_range.1, pixel.0[3]));
                 }
-                let r = diff(r_range);
-                let g = diff(g_range);
-                let b = diff(b_range);
-                let a = 255 - diff(a_range);
-                img.put_pixel(x as u32, y as u32, Rgba([r, g, b, a]));
-                diffs[x + y * image_width] = (r, g, b, a, x as u16, y as u16);
+                // let r = diff(r_range);
+                // let g = diff(g_range);
+                // let b = diff(b_range);
+                // let a = 255 - diff(a_range);
+                diffs[x + y * image_width] = (
+                    r_total_diff,
+                    g_total_diff,
+                    b_total_diff,
+                    a_total_diff,
+                    x as u16,
+                    y as u16,
+                );
             }
         }
-        img.save_with_format("output.png", ImageFormat::Png)
-            .unwrap();
 
         diffs.sort_by(|&(r0, g0, b0, a0, _, _), &(r1, g1, b1, a1, _, _)| {
             ((r1 as usize) + (g1 as usize) + (b1 as usize) + (a1 as usize))
                 .partial_cmp(&((r0 as usize) + (g0 as usize) + (b0 as usize) + (a0 as usize)))
                 .unwrap()
         });
+
         let count = value_t!(matches.value_of("count"), usize).unwrap_or_else(|e| {
             println!("Could not convert count param: {}", e);
             e.exit();
         });
+
+        let top_diffs = &diffs[..min(count, diffs.len())];
+
+        let mut max_r_diff = u32::MIN;
+        let mut min_r_diff = u32::MAX;
+        let mut max_g_diff = u32::MIN;
+        let mut min_g_diff = u32::MAX;
+        let mut max_b_diff = u32::MIN;
+        let mut min_b_diff = u32::MAX;
+        let mut max_a_diff = u32::MIN;
+        let mut min_a_diff = u32::MAX;
+
+        for (r, g, b, a, _, _) in top_diffs {
+            max_r_diff = max(max_r_diff, *r);
+            min_r_diff = min(min_r_diff, *r);
+            max_g_diff = max(max_g_diff, *g);
+            min_g_diff = min(min_g_diff, *g);
+            max_b_diff = max(max_b_diff, *b);
+            min_b_diff = min(min_b_diff, *b);
+            max_a_diff = max(max_a_diff, *a);
+            min_a_diff = min(min_a_diff, *a);
+        }
+
+        let mut normalized_diffs: Vec<(u8, u8, u8, u8, u16, u16)> =
+            vec![(0, 0, 0, 0, 0, 0); top_diffs.len()];
+        for (i, (r, g, b, _, x, y)) in top_diffs.iter().enumerate() {
+            let r = (((*r - min_r_diff) as f64 / (max_r_diff as f64)) * 255.0) as u8;
+            let g = (((*g - min_g_diff) as f64 / (max_g_diff as f64)) * 255.0) as u8;
+            let b = (((*b - min_b_diff) as f64 / (max_b_diff as f64)) * 255.0) as u8;
+            let a = 255u8;
+            img.put_pixel(*x as u32, *y as u32, Rgba([r, g, b, a]));
+            normalized_diffs[i] = (r, g, b, a, *x, *y);
+        }
+        img.save_with_format("output.png", ImageFormat::Png)
+            .unwrap();
+
         let size = value_t!(matches.value_of("size"), usize).unwrap_or_else(|e| {
             println!("Could not convert size param: {}", e);
             e.exit();
         });
         println!("Generating {} z-vectors", count);
         let distribution = probability::distribution::Gaussian::new(0.0, 1.0);
-        let z_vectors: Vec<Vec<_>> = diffs[..min(count, diffs.len())]
+        let z_vectors: Vec<Vec<_>> = normalized_diffs
             .iter()
             .map(|diff| {
                 let mut seed = probability::source::Default::new().seed([
@@ -190,17 +243,20 @@ fn main() {
                 i += 8;
             }
         }
-        for (x, y) in diffs[..count]
+        println!("[");
+        for (x, y) in normalized_diffs[..count]
             .iter()
             .map(|diff| (diff.4, diff.5))
             .collect::<Vec<(u16, u16)>>()
         {
+            println!("[{}, {}],", x, y);
             bin[i] = (x >> 8) as u8;
             bin[i + 1] = (x & 0xff) as u8;
             bin[i + 2] = (y >> 8) as u8;
             bin[i + 3] = (y & 0xff) as u8;
             i += 4;
         }
+        println!("]");
         let output_path = matches.value_of("output").unwrap();
         let mut f = OpenOptions::new()
             .write(true)
@@ -226,6 +282,19 @@ fn main() {
         let mut i = 0;
         let mut unmined_serialized_blocks_len = unmined_serialized_blocks.len();
         while i < unmined_serialized_blocks.len() {
+            if unmined_serialized_blocks[i] == 0x41
+                && unmined_serialized_blocks[i + 1] == 0x41
+                && unmined_serialized_blocks[i + 2] == 0x41
+                && unmined_serialized_blocks[i + 3] == 0x41
+            {
+                println!(
+                    "Got blocks end at byte {}-{} ({:x?})",
+                    i,
+                    i + 4,
+                    &unmined_serialized_blocks[i..i + 4]
+                );
+                break;
+            }
             match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
                 Ok(block) => unmined_blocks.push(*block),
                 Err(s) => {
