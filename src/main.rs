@@ -266,6 +266,7 @@ fn main() {
         let mut total_blocks = 0;
         let mut i = 0;
         let mut unmined_serialized_blocks_len = unmined_serialized_blocks.len();
+        let mut end_magic = Vec::new();
         while i < unmined_serialized_blocks.len() {
             if unmined_serialized_blocks[i] == 0x41
                 && unmined_serialized_blocks[i + 1] == 0x41
@@ -278,6 +279,7 @@ fn main() {
                     i + 4,
                     &unmined_serialized_blocks[i..i + 4]
                 );
+                end_magic = unmined_serialized_blocks[i..].to_vec();
                 break;
             }
             match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
@@ -325,7 +327,10 @@ fn main() {
 
             let mut len = 0;
             let mut all_blocks_serialized =
-                vec![0u8; mined_serialized_blocks_len + unmined_serialized_blocks_len];
+                vec![
+                    0u8;
+                    mined_serialized_blocks_len + unmined_serialized_blocks_len + end_magic.len()
+                ];
             for (block_n, i_block) in mined_blocks.iter_mut().enumerate() {
                 i_block
                     .serialize_into(&mut all_blocks_serialized, &mut len)
@@ -345,6 +350,7 @@ fn main() {
                         )
                     });
             }
+            all_blocks_serialized[len..].copy_from_slice(end_magic.as_slice());
             remove_file(serialized_block_location).unwrap_or_else(|e| {
                 println!(
                     "Warning: Could not clean \"{:?}\". {}",
