@@ -280,6 +280,7 @@ fn main() {
                     &unmined_serialized_blocks[i..i + 4]
                 );
                 end_magic = unmined_serialized_blocks[i..].to_vec();
+                unmined_serialized_blocks_len = i;
                 break;
             }
             match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
@@ -296,15 +297,15 @@ fn main() {
         let mut mined_serialized_blocks_len = 0;
         println!(
             "Found {} blocks ({}B), starting mining",
-            total_blocks,
-            unmined_serialized_blocks.len()
+            total_blocks, unmined_serialized_blocks_len
         );
         for (n, mut block) in unmined_blocks.clone().iter_mut().enumerate() {
             if BlockHash::contains_enough_work(&block.hash()) {
                 println!(
                     "{}",
-                    format!("Block {}/{} already mined ✔️", n, total_blocks).green(),
+                    format!("Block {}/{} already mined ✔️", n + 1, total_blocks).green(),
                 );
+                mined_blocks.push(block.clone());
                 continue;
             }
             print!("Mining block {}/{}", n + 1, total_blocks);
@@ -318,7 +319,7 @@ fn main() {
                 Ok(mined_block) => {
                     mined_serialized_blocks_len += mined_block.serialized_len();
                     unmined_serialized_blocks_len -= block.serialized_len();
-                    mined_blocks.push(mined_block);
+                    mined_blocks.push(*mined_block.clone());
                     println!("{}", ". Done ✔️".green());
                 }
                 Err(e) => println!(". Got none block. {}", e),
@@ -338,7 +339,6 @@ fn main() {
                         panic!("Error: Could not serialize block {}. {}", block_n, e)
                     });
             }
-
             for (block_n, i_block) in unmined_blocks[n + 1..].iter().enumerate() {
                 i_block
                     .serialize_into(&mut all_blocks_serialized, &mut len)
@@ -380,6 +380,19 @@ fn main() {
                 let mut i = 0;
                 let mut j = 0;
                 while i < serialized_blocks.len() {
+                    if serialized_blocks[i] == 0x41
+                        && serialized_blocks[i + 1] == 0x41
+                        && serialized_blocks[i + 2] == 0x41
+                        && serialized_blocks[i + 3] == 0x41
+                    {
+                        println!(
+                            "Got blocks end at byte {}-{} ({:x?})",
+                            i,
+                            i + 4,
+                            &serialized_blocks[i..i + 4]
+                        );
+                        break;
+                    }
                     print!("Block {} ", j);
                     j += 1;
                     match Block::from_serialized(&serialized_blocks, &mut i) {

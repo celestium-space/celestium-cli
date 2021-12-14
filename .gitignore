@@ -16,5 +16,6 @@ keys/
 **/*.jpg
 **/*.png
 blocks
+blocks_*
 mined_blocks
 random
