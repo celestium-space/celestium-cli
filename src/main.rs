@@ -2,17 +2,25 @@ use celestium::{
     block::Block,
     block_hash::BlockHash,
     serialize::{DynamicSized, Serialize},
-    wallet::{Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK},
+    wallet::{BinaryWallet, Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK, HASH_SIZE},
 };
 #[macro_use]
 extern crate clap;
 use colored::*;
 use image::{io::Reader as ImageReader, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use probability::{self, distribution::Sample};
-use std::cmp::{max, min};
-use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::time::Instant;
+use std::{
+    cmp::{max, min},
+    fs::read,
+};
+
+use indicatif::{ProgressBar, ProgressIterator};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+};
 use std::{fs::remove_file, fs::File, io::prelude::*};
 
 macro_rules! unwrap_or_print {
@@ -41,7 +49,8 @@ fn main() {
         (about: "Celestium Command Line Interface")
         (@subcommand generate =>
             (about: "Generates a new test blockchain")
-            (@arg blocks: +required +takes_value -b --blocks "Path to binary blocks file")
+            (@arg blocks: +required +takes_value -b --blocks "Path to save binary blocks file to")
+            (@arg sk: +required +takes_value -s --secret "Path to save secret key file to")
             (@arg count: +required +takes_value -c --count "Amount of unmined blocks to generate")
         )
         (@subcommand random =>
@@ -59,42 +68,43 @@ fn main() {
             (about: "Tests a binary blocks file for completed work")
             (@arg blocks: +required +takes_value -b --blocks "Path to binary blocks file")
         )
+        (@subcommand count =>
+            (about: "Count IDs")
+            (@arg data: +required +takes_value -i --data "Path to data dir")
+        )
     )
     .get_matches();
 
     if let Some(matches) = matches.subcommand_matches("generate") {
-        match Wallet::generate_init_blockchain_unmined(
-            value_t!(matches.value_of("count"), u128).unwrap_or_else(|e| {
-                println!("Could not convert count param: {}", e);
-                e.exit();
-            }),
-        ) {
-            Ok(blocks) => {
-                println!("Generated {} blocks, serializing", blocks.len());
-
-                let mut serialized_blocks_len = 0;
-                for block in &blocks {
-                    serialized_blocks_len += block.serialized_len();
-                }
-
-                let mut i = 0;
-                let mut serialized_blocks = vec![0u8; serialized_blocks_len];
-                for (j, block) in blocks.into_iter().enumerate() {
-                    block
-                        .serialize_into(&mut serialized_blocks, &mut i)
-                        .unwrap_or_else(|_| panic!("Error: Could not serialize block {}", j));
-                }
-                let path = matches.value_of("blocks").unwrap();
-                remove_file(path)
-                    .unwrap_or_else(|e| println!("Warning: Could not clean file. {}", e));
-                let mut f = OpenOptions::new()
+        match Wallet::generate_init_blockchain() {
+            Ok(wallet) => {
+                println!("Generated {} blocks, serializing", wallet.count_blocks());
+                let serialized_blocks = wallet.serialize_blockchain().unwrap();
+                let sk = wallet.get_sk().unwrap();
+                let blocks_path = matches.value_of("blocks").unwrap();
+                let sk_path = matches.value_of("sk").unwrap();
+                remove_file(blocks_path)
+                    .unwrap_or_else(|e| println!("Warning: Could not clean blocks file. {}", e));
+                remove_file(sk_path).unwrap_or_else(|e| {
+                    println!("Warning: Could not clean secret key file. {}", e)
+                });
+                let mut blocks_f = OpenOptions::new()
                     .write(true)
                     .create(true)
-                    .open(path)
-                    .expect("Error: Could not open file");
-                f.write_all(&serialized_blocks)
+                    .open(blocks_path)
+                    .expect("Error: Could not create blocks file");
+                let mut sk_f = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(sk_path)
+                    .expect("Error: Could not create secret key file");
+                blocks_f
+                    .write_all(&serialized_blocks)
+                    .expect("Error: Could not write to blocks file");
+                println!("{:?}", sk);
+                sk_f.write_all(sk.to_string().as_bytes())
                     .expect("Error: Could not write to file");
-                f.flush().expect("Error: Could not flush file");
+                blocks_f.flush().expect("Error: Could not flush file");
                 println!("Done.")
             }
             Err(e) => {
@@ -224,6 +234,7 @@ fn main() {
             .collect();
 
         let mut bin = vec![0u8; count * size * 8 + 4 * count];
+        println!("Total len {}", bin.len());
         let mut i = 0;
         for z_vector in z_vectors {
             for sample in z_vector {
@@ -231,6 +242,7 @@ fn main() {
                 i += 8;
             }
         }
+        println!("Z-Vector cut off, coords from here on: {}", i);
         for (x, y) in normalized_diffs[..count]
             .iter()
             .map(|diff| (diff.4, diff.5))
@@ -252,164 +264,166 @@ fn main() {
         f.write_all(&bin).unwrap();
         f.flush().unwrap();
     } else if let Some(matches) = matches.subcommand_matches("mine") {
-        let serialized_block_location = matches.value_of("blocks").unwrap();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(serialized_block_location)
-            .unwrap();
-        let mut unmined_serialized_blocks = Vec::new();
-        file.read_to_end(&mut unmined_serialized_blocks).unwrap();
+        // let data_dir = matches.value_of("blocks").unwrap();
 
-        let (pk, sk) = Wallet::generate_ec_keys();
-        let wallet = Wallet::new(pk, sk, true).unwrap();
-        let mut unmined_blocks = Vec::default();
-        let mut total_blocks = 0;
-        let mut i = 0;
-        let mut unmined_serialized_blocks_len = unmined_serialized_blocks.len();
-        let mut end_magic = Vec::new();
-        while i < unmined_serialized_blocks.len() {
-            if unmined_serialized_blocks[i] == 0x41
-                && unmined_serialized_blocks[i + 1] == 0x41
-                && unmined_serialized_blocks[i + 2] == 0x41
-                && unmined_serialized_blocks[i + 3] == 0x41
-            {
-                println!(
-                    "Got blocks end at byte {}-{} ({:x?})",
-                    i,
-                    i + 4,
-                    &unmined_serialized_blocks[i..i + 4]
-                );
-                end_magic = unmined_serialized_blocks[i..].to_vec();
-                unmined_serialized_blocks_len = i;
-                break;
-            }
-            match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
-                Ok(block) => unmined_blocks.push(*block),
-                Err(s) => {
-                    println!("Got invalid block at {}. {}", total_blocks, s);
-                    break;
-                }
-            };
-            total_blocks += 1;
-        }
-        let mut back_hash = unmined_blocks[0].back_hash.clone();
-        let mut mined_blocks = Vec::default();
-        let mut mined_serialized_blocks_len = 0;
-        println!(
-            "Found {} blocks ({}B), starting mining",
-            total_blocks, unmined_serialized_blocks_len
+        // let mut unmined_blocks = Vec::default();
+        // let mut total_blocks = 0;
+        // let mut i = 0;
+        // let mut unmined_serialized_blocks_len = unmined_serialized_blocks.len();
+        // let mut end_magic = Vec::new();
+        // while i < unmined_serialized_blocks.len() {
+        //     if unmined_serialized_blocks[i] == 0x41
+        //         && unmined_serialized_blocks[i + 1] == 0x41
+        //         && unmined_serialized_blocks[i + 2] == 0x41
+        //         && unmined_serialized_blocks[i + 3] == 0x41
+        //     {
+        //         println!(
+        //             "Got blocks end at byte {}-{} ({:x?})",
+        //             i,
+        //             i + 4,
+        //             &unmined_serialized_blocks[i..i + 4]
+        //         );
+        //         end_magic = unmined_serialized_blocks[i..].to_vec();
+        //         unmined_serialized_blocks_len = i;
+        //         break;
+        //     }
+        //     match Block::from_serialized(&unmined_serialized_blocks, &mut i) {
+        //         Ok(block) => unmined_blocks.push(*block),
+        //         Err(s) => {
+        //             println!("Got invalid block at {}. {}", total_blocks, s);
+        //             break;
+        //         }
+        //     };
+        //     total_blocks += 1;
+        // }
+        // let mut back_hash = unmined_blocks[0].back_hash.clone();
+        // let mut mined_blocks = Vec::default();
+        // let mut mined_serialized_blocks_len = 0;
+        // println!(
+        //     "Found {} blocks ({}B), starting mining",
+        //     total_blocks, unmined_serialized_blocks_len
+        // );
+        // for (n, mut block) in unmined_blocks.clone().iter_mut().enumerate() {
+        //     if BlockHash::contains_enough_work(&block.hash().hash()) {
+        //         println!(
+        //             "{}",
+        //             format!("Block {}/{} already mined ✔️", n + 1, total_blocks).green(),
+        //         );
+        //         mined_blocks.push(block.clone());
+        //         continue;
+        //     }
+        //     print!("Mining block {}/{}", n + 1, total_blocks);
+        //     io::stdout().flush().unwrap();
+        //     block.back_hash = back_hash;
+        //     let block_hash = block.hash();
+        //     let start = Instant::now();
+        //     let mined_block = wallet.mine_block(DEFAULT_N_THREADS, DEFAULT_PAR_WORK, block.clone());
+        //     back_hash = BlockHash::from(block_hash);
+        //     match mined_block {
+        //         Ok(mined_block) => {
+        //             mined_serialized_blocks_len += mined_block.serialized_len();
+        //             unmined_serialized_blocks_len -= block.serialized_len();
+        //             mined_blocks.push(*mined_block.clone());
+        //             println!("{}", ". Done ✔️".green());
+        //         }
+        //         Err(e) => println!(". Got none block. {}", e),
+        //     }
+        //     println!("Time: {:?}", start.elapsed());
+
+        //     let mut len = 0;
+        //     let mut all_blocks_serialized =
+        //         vec![
+        //             0u8;
+        //             mined_serialized_blocks_len + unmined_serialized_blocks_len + end_magic.len()
+        //         ];
+        //     for (block_n, i_block) in mined_blocks.iter_mut().enumerate() {
+        //         i_block
+        //             .serialize_into(&mut all_blocks_serialized, &mut len)
+        //             .unwrap_or_else(|e| {
+        //                 panic!("Error: Could not serialize block {}. {}", block_n, e)
+        //             });
+        //     }
+        //     for (block_n, i_block) in unmined_blocks[n + 1..].iter().enumerate() {
+        //         i_block
+        //             .serialize_into(&mut all_blocks_serialized, &mut len)
+        //             .unwrap_or_else(|e| {
+        //                 panic!(
+        //                     "Error: Could not serialize block {}. {}",
+        //                     n + 1 + block_n,
+        //                     e
+        //                 )
+        //             });
+        //     }
+        //     all_blocks_serialized[len..].copy_from_slice(end_magic.as_slice());
+        //     remove_file(serialized_block_location).unwrap_or_else(|e| {
+        //         println!(
+        //             "Warning: Could not clean \"{:?}\". {}",
+        //             serialized_block_location, e
+        //         )
+        //     });
+        //     println!(
+        //         "Saving checkpoint ({}B) to {:?}",
+        //         mined_serialized_blocks_len + unmined_serialized_blocks_len,
+        //         serialized_block_location
+        //     );
+
+        //     let mut f = OpenOptions::new()
+        //         .write(true)
+        //         .create(true)
+        //         .open(serialized_block_location)
+        //         .unwrap();
+        //     f.write_all(&all_blocks_serialized).unwrap();
+        //     f.flush().unwrap();
+        // }
+    } else if let Some(matches) = matches.subcommand_matches("count") {
+        let data_dir = matches.value_of("data").unwrap();
+
+        let load =
+            |filename: &str| read(format!("{}/{}", data_dir, filename)).map_err(|e| e.to_string());
+
+        println!("Loading binary wallet...");
+        let bin_wallet = &BinaryWallet {
+            blockchain_bin: load("blockchain").unwrap(),
+            pk_bin: load("pk").unwrap(),
+            sk_bin: load("sk").unwrap(),
+            on_chain_transactions_bin: load("on_chain_transactions").unwrap(),
+            unspent_outputs_bin: load("unspent_outputs").unwrap(),
+            nft_lookups_bin: load("nft_lookups").unwrap(),
+            off_chain_transactions_bin: load("off_chain_transactions").unwrap(),
+        };
+        println!("Binary wallet loaded!");
+        println!("Loading wallet...");
+        let wallet = Wallet::from_binary(
+            bin_wallet,
+            env::var("RELOAD_UNSPENT_OUTPUTS").is_ok(),
+            env::var("IGNORE_OFF_CHAIN_TRANSACTIONS").is_ok(),
+        )
+        .unwrap();
+        println!("Wallet loaded!");
+
+        let pb = ProgressBar::with_message(
+            ProgressBar::new(wallet.unspent_outputs.len() as u64),
+            "Searching...".to_string(),
         );
-        for (n, mut block) in unmined_blocks.clone().iter_mut().enumerate() {
-            if BlockHash::contains_enough_work(&block.hash()) {
-                println!(
-                    "{}",
-                    format!("Block {}/{} already mined ✔️", n + 1, total_blocks).green(),
-                );
-                mined_blocks.push(block.clone());
-                continue;
-            }
-            print!("Mining block {}/{}", n + 1, total_blocks);
-            io::stdout().flush().unwrap();
-            block.back_hash = back_hash;
-            let block_hash = block.hash();
-            let start = Instant::now();
-            let mined_block = wallet.mine_block(DEFAULT_N_THREADS, DEFAULT_PAR_WORK, block.clone());
-            back_hash = BlockHash::from(block_hash);
-            match mined_block {
-                Ok(mined_block) => {
-                    mined_serialized_blocks_len += mined_block.serialized_len();
-                    unmined_serialized_blocks_len -= block.serialized_len();
-                    mined_blocks.push(*mined_block.clone());
-                    println!("{}", ". Done ✔️".green());
-                }
-                Err(e) => println!(". Got none block. {}", e),
-            }
-            println!("Time: {:?}", start.elapsed());
-
-            let mut len = 0;
-            let mut all_blocks_serialized =
-                vec![
-                    0u8;
-                    mined_serialized_blocks_len + unmined_serialized_blocks_len + end_magic.len()
-                ];
-            for (block_n, i_block) in mined_blocks.iter_mut().enumerate() {
-                i_block
-                    .serialize_into(&mut all_blocks_serialized, &mut len)
-                    .unwrap_or_else(|e| {
-                        panic!("Error: Could not serialize block {}. {}", block_n, e)
-                    });
-            }
-            for (block_n, i_block) in unmined_blocks[n + 1..].iter().enumerate() {
-                i_block
-                    .serialize_into(&mut all_blocks_serialized, &mut len)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "Error: Could not serialize block {}. {}",
-                            n + 1 + block_n,
-                            e
-                        )
-                    });
-            }
-            all_blocks_serialized[len..].copy_from_slice(end_magic.as_slice());
-            remove_file(serialized_block_location).unwrap_or_else(|e| {
-                println!(
-                    "Warning: Could not clean \"{:?}\". {}",
-                    serialized_block_location, e
-                )
-            });
-            println!(
-                "Saving checkpoint ({}B) to {:?}",
-                mined_serialized_blocks_len + unmined_serialized_blocks_len,
-                serialized_block_location
-            );
-
-            let mut f = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .open(serialized_block_location)
+        let to_find =
+            hex::decode("e400ce26224f3a281f12f9d044ed7ca7c819d985d07b8167d9f139483bb7da1c")
                 .unwrap();
-            f.write_all(&all_blocks_serialized).unwrap();
-            f.flush().unwrap();
-        }
-    } else if let Some(matches) = matches.subcommand_matches("test") {
-        let serialized_block_location = matches.value_of("blocks").unwrap();
-        match File::open(serialized_block_location) {
-            Ok(mut file) => {
-                let mut serialized_blocks = Vec::new();
-                file.read_to_end(&mut serialized_blocks).unwrap();
-                let mut i = 0;
-                let mut j = 0;
-                while i < serialized_blocks.len() {
-                    if serialized_blocks[i] == 0x41
-                        && serialized_blocks[i + 1] == 0x41
-                        && serialized_blocks[i + 2] == 0x41
-                        && serialized_blocks[i + 3] == 0x41
-                    {
-                        println!(
-                            "Got blocks end at byte {}-{} ({:x?})",
-                            i,
-                            i + 4,
-                            &serialized_blocks[i..i + 4]
-                        );
-                        break;
-                    }
-                    print!("Block {} ", j);
-                    j += 1;
-                    match Block::from_serialized(&serialized_blocks, &mut i) {
-                        Ok(block) => {
-                            if BlockHash::contains_enough_work(&block.hash()) {
-                                println!("{}", "contains enough work ✔️".green())
-                            } else {
-                                println!("{}", "does not contain enough work ❌".red())
+        let to_find = to_find.as_slice();
+        for (pk, ts) in wallet.unspent_outputs {
+            for ((b, th, i), to) in ts {
+                if b == BlockHash::from([0u8; HASH_SIZE]) {
+                    let t = wallet.off_chain_transactions.get(&th);
+                    if let Some(t) = t {
+                        if let Ok(r) = t.get_id() {
+                            if r == to_find {
+                                println!("FOUND! {}", t.get_outputs()[0].pk);
                             }
                         }
-                        Err(s) => println!("{}", s.red()),
-                    };
+                    }
                 }
             }
-            Err(e) => {
-                println!("Error opening file: {}", e);
-            }
+            pb.inc(1);
         }
+        pb.finish();
     };
 }
