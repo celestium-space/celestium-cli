@@ -15,7 +15,8 @@ keys/
 **/*.bin
 **/*.jpg
 **/*.png
-blocks
-blocks_*
+blocks*
+data*
+sk.txt
 mined_blocks
 random
