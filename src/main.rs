@@ -3,23 +3,25 @@ use celestium::{
     block_hash::BlockHash,
     serialize::{DynamicSized, Serialize},
     transaction::Transaction,
+    transaction_output::TransactionOutput,
+    transaction_value::TransactionValue,
     wallet::{
-        BinaryWallet, Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK, DEFAULT_PROGRESSBAR_TEMPLATE,
+        self, BinaryWallet, Wallet, DEFAULT_N_THREADS, DEFAULT_PAR_WORK,
+        DEFAULT_PROGRESSBAR_TEMPLATE,
     },
 };
 #[macro_use]
 extern crate clap;
 use colored::*;
 use image::{io::Reader as ImageReader, GenericImageView, ImageFormat, Rgba, RgbaImage};
-
-use mongodb::{
-    bson::{doc, oid::ObjectId},
-    options::ClientOptions,
-    sync::Client,
-};
+use mongodb::bson::{doc, oid::ObjectId};
 use probability::{self, distribution::Sample};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use rayon::ThreadPoolBuilder;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
-use std::time::Instant;
+use serde::Deserialize;
+use sha3::{Digest, Sha3_224, Sha3_256};
 use std::{
     cmp::{max, min},
     fs::read,
@@ -28,6 +30,8 @@ use std::{
     collections::HashMap,
     io::{self, Write},
 };
+use std::{fs::File, time::Instant};
+use websocket::{sync::client::ClientBuilder, ws::dataframe::DataFrame, Message};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{
@@ -35,8 +39,6 @@ use std::{
     fs::{self, OpenOptions},
 };
 use std::{fs::remove_file, io::prelude::*};
-
-static DEFAULT_MONGODB_STORE_COLLECTION_NAME: &str = "asteroids";
 
 macro_rules! unwrap_or_print {
     ($result: expr, $format_string: expr) => {
@@ -49,6 +51,15 @@ macro_rules! unwrap_or_print {
         }
     };
 }
+
+#[derive(Deserialize, Debug)]
+struct Data {
+    data: Vec<[u16; 3]>,
+}
+
+const PIXEL_HASH_SIZE: usize = 28;
+const NUM_COLORS: u8 = 56;
+const DUST_PER_CEL: u128 = 10_000_000_000_000_000_000_000_000_000_000;
 
 const COLOR_MAP: [[u8; 4]; 57] = [
     [0x00, 0x00, 0x00, 0xff],
@@ -204,6 +215,24 @@ struct StoreItem {
     id_hash: String,
 }
 
+fn calc_pixel_hash(
+    x: u16,
+    y: u16,
+    color: u8,
+    back_hash: [u8; PIXEL_HASH_SIZE],
+) -> [u8; PIXEL_HASH_SIZE] {
+    let mut to_digest = [0u8; 33];
+    to_digest[..PIXEL_HASH_SIZE].copy_from_slice(&back_hash);
+    to_digest[PIXEL_HASH_SIZE] = (x >> 8) as u8;
+    to_digest[PIXEL_HASH_SIZE + 1] = (x & 0xff) as u8;
+    to_digest[PIXEL_HASH_SIZE + 2] = (y >> 8) as u8;
+    to_digest[PIXEL_HASH_SIZE + 3] = (y & 0xff) as u8;
+    to_digest[PIXEL_HASH_SIZE + 4] = color as u8;
+    let mut hash = [0u8; PIXEL_HASH_SIZE];
+    hash.copy_from_slice(&Sha3_224::digest(&to_digest));
+    hash
+}
+
 fn diff(r: (u8, u8)) -> u32 {
     if r.0 > r.1 {
         (r.0 - r.1) as u32
@@ -234,18 +263,25 @@ fn main() {
             (@arg blocks: +required +takes_value -b --blocks "Path to binary blocks file")
             (@arg sk: +required +takes_value -s --sk "Path to binary Secret Key file")
         )
-        (@subcommand test =>
-            (about: "Tests a binary blocks file for completed work")
+        (@subcommand verify =>
+            (about: "Verifies a binary blocks file for completed work")
             (@arg blocks: +required +takes_value -b --blocks "Path to binary blocks file")
         )
         (@subcommand count =>
             (about: "Count IDs")
             (@arg data: +required +takes_value -i --data "Path to data dir")
         )
+        (@subcommand collect =>
+            (about: "Collect off chain transactions into block")
+            (@arg data: +required +takes_value -i --data "Path to data dir")
+        )
         (@subcommand piximg =>
             (about: "Creates a video from pixel transactions on the Celestium blockchain")
             (@arg FILE: +required +takes_value -i "Path to off chain transactions file")
             (@arg DIRECTORY: +required +takes_value -o "Path to save frames of video")
+        )
+        (@subcommand doit =>
+            (about: "Does it")
         )
     )
     .get_matches();
@@ -438,6 +474,47 @@ fn main() {
         println!("Saving {} z-vectors to '{}'", count, output_path);
         f.write_all(&bin).unwrap();
         f.flush().unwrap();
+    } else if let Some(matches) = matches.subcommand_matches("verify") {
+        let serialized_blocks_location = matches.value_of("blocks").unwrap();
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(serialized_blocks_location)
+            .unwrap();
+        let mut serialized_blocks = Vec::new();
+        file.read_to_end(&mut serialized_blocks).unwrap();
+
+        let mut i = 0;
+        let mut n = 0;
+        while i < serialized_blocks.len() {
+            n += 1;
+            if serialized_blocks[i] == 0x41
+                && serialized_blocks[i + 1] == 0x41
+                && serialized_blocks[i + 2] == 0x41
+                && serialized_blocks[i + 3] == 0x41
+            {
+                println!(
+                    "Got blocks end at byte {}-{} ({:x?})",
+                    i,
+                    i + 4,
+                    &serialized_blocks[i..i + 4]
+                );
+                break;
+            }
+            match Block::from_serialized(&serialized_blocks, &mut i) {
+                Ok(block) => {
+                    if BlockHash::contains_enough_work(&block.hash().hash()) {
+                        println!("{}", format!("Block {} mined ✔️", n).green());
+                    } else {
+                        println!("{}", format!("Block {} not mined ❌", n).red());
+                    }
+                }
+                Err(s) => {
+                    println!("Got invalid block at {}. {}", i, s);
+                    break;
+                }
+            };
+        }
     } else if let Some(matches) = matches.subcommand_matches("mine") {
         let serialized_blocks_location = matches.value_of("blocks").unwrap();
         let serialized_sk_location = matches.value_of("sk").unwrap();
@@ -491,7 +568,7 @@ fn main() {
             };
             total_blocks += 1;
         }
-        let mut back_hash = unmined_blocks[0].back_hash.clone();
+        let mut back_hash = unmined_blocks[0].hash();
         let mut mined_blocks = Vec::default();
         let mut mined_serialized_blocks_len = 0;
         println!(
@@ -573,76 +650,6 @@ fn main() {
     } else if let Some(matches) = matches.subcommand_matches("count") {
         let data_dir = matches.value_of("data").unwrap();
 
-        let mongodb_connection_string =
-            env::var("MONGODB_CONNECTION_STRING").unwrap_or("mongodb://localhost/".to_string());
-
-        let mongodb_database_name =
-            env::var("MONGO_DATABASE_NAME").unwrap_or("asterank".to_string());
-
-        let mut client_options = match ClientOptions::parse(&mongodb_connection_string) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Could not create mongo client options: {}", e);
-                return;
-            }
-        };
-
-        // Manually set an option
-        client_options.app_name = Some("celestium".to_string());
-        // Get a handle to the cluster
-        let mongodb_client = match Client::with_options(client_options) {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Could not set app name: {}", e);
-                return;
-            }
-        };
-
-        // Ping the server to see if you can connect to the cluster
-        let database = mongodb_client.database(&mongodb_database_name);
-        if let Err(e) = database.run_command(doc! {"ping": 1}, None) {
-            println!(
-                "Could not ping database \"{}\": {}",
-                mongodb_database_name, e
-            );
-            return;
-        };
-
-        let store_collection_name: String = env::var("MONGODB_STORE_COLLECTION_NAME")
-            .unwrap_or(DEFAULT_MONGODB_STORE_COLLECTION_NAME.to_string());
-        let store_collection = database.collection::<StoreItem>(&store_collection_name);
-
-        if database
-            .list_collection_names(doc! {"name": &store_collection_name})
-            .unwrap()
-            .len()
-            != 1
-        {
-            println!(
-                "Could not find collection \"{}\" in database \"{}\"",
-                &store_collection_name, mongodb_database_name
-            );
-            return;
-        }
-
-        println!(
-            "MongoDB Connected successfully, collections: {:?}",
-            database.list_collection_names(doc! {}).unwrap()
-        );
-
-        let mut ids_to_lookup = HashMap::new();
-
-        for item in store_collection
-            .find(doc! {"id_hash": {"$exists": true}}, None)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            ids_to_lookup.insert(hex::decode(item.clone().id_hash).unwrap(), item.clone());
-        }
-
-        println!("TEST: {}", ids_to_lookup.len());
-
         let load =
             |filename: &str| read(format!("{}/{}", data_dir, filename)).map_err(|e| e.to_string());
 
@@ -683,70 +690,213 @@ fn main() {
         .unwrap();
         println!("Wallet loaded!");
 
-        let our_pk = wallet.get_pk().unwrap();
-        let mut registered_base_transaction_ids = Vec::new();
-        let mut registered_transferred_ids = Vec::new();
-        let mut unregistred_base_transaction_ids = Vec::new();
-        let mut unregistred_transferred_ids = Vec::new();
-        let mut our_registered_base_transaction_ids = Vec::new();
-        let mut our_registered_transferred_ids = Vec::new();
-        let mut our_unregistred_base_transaction_ids = Vec::new();
-        let mut our_unregistred_transferred_ids = Vec::new();
-        for (_, t) in wallet.off_chain_transactions {
-            for o in t.get_outputs() {
-                if let Ok(id) = o.value.get_id() {
-                    match (
-                        o.pk == our_pk,
-                        ids_to_lookup.get(&id.to_vec()),
-                        t.is_base_transaction(),
-                    ) {
-                        (true, Some(_), true) => our_registered_base_transaction_ids.push(id),
-                        (true, Some(_), false) => our_registered_transferred_ids.push(id),
-                        (true, None, true) => our_unregistred_base_transaction_ids.push(id),
-                        (true, None, false) => our_unregistred_transferred_ids.push(id),
-                        (false, Some(_), true) => registered_base_transaction_ids.push(id),
-                        (false, Some(item), false) => registered_transferred_ids.push(item),
-                        (false, None, true) => unregistred_base_transaction_ids.push(id),
-                        (false, None, false) => unregistred_transferred_ids.push(id),
+        let pb = ProgressBar::with_message(
+            ProgressBar::new(wallet.off_chain_transactions.len() as u64),
+            "Loading candidates from off chain transactions",
+        );
+        pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
+        let mut candidates: HashMap<
+            (u16, u16),
+            HashMap<[u8; PIXEL_HASH_SIZE], [u8; PIXEL_HASH_SIZE]>,
+        > = HashMap::new();
+        let pk = wallet.get_pk().unwrap();
+        let mut total_value_spent = 0;
+        let mut total_things_bought = 0;
+        for (_, transaction) in &wallet.off_chain_transactions {
+            pb.inc(1);
+            if let Ok(base_message) = transaction.get_base_transaction_message() {
+                let mut back_hash: [u8; PIXEL_HASH_SIZE] = [0u8; PIXEL_HASH_SIZE];
+                back_hash.copy_from_slice(&base_message[..PIXEL_HASH_SIZE]);
+                let x: u16 = ((base_message[PIXEL_HASH_SIZE] as u16) << 8)
+                    + (base_message[PIXEL_HASH_SIZE + 1] as u16);
+                let y: u16 = ((base_message[PIXEL_HASH_SIZE + 2] as u16) << 8)
+                    + (base_message[PIXEL_HASH_SIZE + 3] as u16);
+                let color: u8 = base_message[PIXEL_HASH_SIZE + 4];
+                if x < 1000 && y < 1000 && color < NUM_COLORS {
+                    let a = candidates
+                        .entry((x as u16, y as u16))
+                        .or_insert_with(HashMap::new);
+                    a.insert(calc_pixel_hash(x, y, color, back_hash), back_hash);
+                }
+            } else {
+                let things_bought = transaction
+                    .get_inputs()
+                    .iter()
+                    .map(|i| {
+                        wallet
+                            .get_transaction(&i.block_hash, &i.transaction_hash)
+                            .unwrap()
+                            .get_output(&i.output_index)
+                    })
+                    .filter(|o| o.value.is_id_transfer() && o.pk == pk)
+                    .count();
+                if things_bought > 0 {
+                    total_things_bought += things_bought;
+                    for output in transaction.get_outputs() {
+                        if output.pk == pk {
+                            if let Ok(value) = output.value.get_value() {
+                                total_value_spent += value;
+                            }
+                        }
                     }
                 }
             }
         }
-
-        println!(
-            "Deep lookup (not ours):\nregistered base transaction ids: {}\nregistered transferred ids: {}\nunregistred base transaction ids: {}\nunregistred transferred ids: {}",
-            registered_base_transaction_ids.len(),
-            registered_transferred_ids.len(),
-            unregistred_base_transaction_ids.len(),
-            unregistred_transferred_ids.len()
-        );
-        println!(
-            "Deep lookup (ours):\nregistered base transaction ids: {}\nregistered transferred ids: {}\nunregistred base transaction ids: {}\nunregistred transferred ids: {}",
-            our_registered_base_transaction_ids.len(),
-            our_registered_transferred_ids.len(),
-            our_unregistred_base_transaction_ids.len(),
-            our_unregistred_transferred_ids.len()
-        );
+        pb.finish();
 
         let pb = ProgressBar::with_message(
-            ProgressBar::new(registered_transferred_ids.len() as u64),
-            "Buying items ;)".to_string(),
+            ProgressBar::new(candidates.len() as u64),
+            "Processing candidates",
         );
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}"),
-        );
-        for item in registered_transferred_ids {
-            store_collection
-                .update_one(
-                    doc! {"_id": item._id},
-                    doc! {"$set": {"state": "bought"}},
-                    None,
-                )
-                .unwrap();
+        pb.set_style(ProgressStyle::default_bar().template(DEFAULT_PROGRESSBAR_TEMPLATE));
+        let mut total_set_pixels_unique = 0;
+        let mut total_set_pixels = 0;
+        for ((x, y), candidate) in candidates.iter() {
             pb.inc(1);
+            let mut longest_candidate = (None, 0);
+            let mut to_digest = [0u8; 33];
+            to_digest[PIXEL_HASH_SIZE] = (x >> 8) as u8;
+            to_digest[PIXEL_HASH_SIZE + 1] = (x & 0xff) as u8;
+            to_digest[PIXEL_HASH_SIZE + 2] = (y >> 8) as u8;
+            to_digest[PIXEL_HASH_SIZE + 3] = (y & 0xff) as u8;
+            to_digest[PIXEL_HASH_SIZE + 4] = 7u8;
+            let mut init_hash = [0u8; PIXEL_HASH_SIZE];
+            init_hash.copy_from_slice(&Sha3_224::digest(&to_digest));
+            for (hash, back_hash) in candidate {
+                let mut len = 1;
+                let mut back_item = back_hash;
+                while let Some(tmp_back_item) = candidate.get(back_item) {
+                    back_item = tmp_back_item;
+                    len += 1;
+                }
+                if len > longest_candidate.1 && *back_item == init_hash {
+                    longest_candidate = (Some(hash), len);
+                }
+            }
+
+            if let (Some(_), len) = longest_candidate {
+                total_set_pixels_unique += 1;
+                total_set_pixels += len;
+            }
         }
         pb.finish();
+
+        println!("------------------------------------------------------");
+        println!("Total things bought from us: {}", total_things_bought);
+        println!(
+            "Total value spent on us: {}.{:0width$}",
+            total_value_spent / DUST_PER_CEL,
+            total_value_spent % DUST_PER_CEL,
+            width = 31
+        );
+
+        println!(
+            "Found {} unique pixels out of {} total set",
+            total_set_pixels_unique, total_set_pixels
+        );
+        println!(
+            "{} unique users have interacted with the blockchain",
+            wallet.unspent_outputs.len()
+        );
+    } else if let Some(matches) = matches.subcommand_matches("collect") {
+        let data_dir = matches.value_of("data").unwrap();
+
+        let load =
+            |filename: &str| read(format!("{}/{}", data_dir, filename)).map_err(|e| e.to_string());
+
+        println!("Loading binary wallet...");
+        let bin_wallet = &BinaryWallet {
+            blockchain_bin: load("blockchain").unwrap(),
+            pk_bin: load("pk").unwrap(),
+            sk_bin: load("sk").unwrap(),
+            on_chain_transactions_bin: load("on_chain_transactions").unwrap(),
+            unspent_outputs_bin: load("unspent_outputs").unwrap(),
+            nft_lookups_bin: load("nft_lookups").unwrap(),
+            off_chain_transactions_bin: load("off_chain_transactions").unwrap(),
+        };
+        println!("Binary wallet loaded!");
+        println!("blockchain: {}", bin_wallet.blockchain_bin.len());
+        println!("pk_bin: {}", bin_wallet.pk_bin.len());
+        println!("sk_bin: {}", bin_wallet.sk_bin.len());
+        println!(
+            "on_chain_transactions_bin: {}",
+            bin_wallet.on_chain_transactions_bin.len()
+        );
+        println!(
+            "unspent_outputs_bin: {}",
+            bin_wallet.unspent_outputs_bin.len()
+        );
+        println!("nft_lookups_bin: {}", bin_wallet.nft_lookups_bin.len());
+        println!(
+            "off_chain_transactions_bin: {}",
+            bin_wallet.off_chain_transactions_bin.len()
+        );
+        println!("Loading wallet...");
+        let mut wallet = Wallet::from_binary(
+            bin_wallet,
+            env::var("RELOAD_UNSPENT_OUTPUTS").is_ok(),
+            env::var("RELOAD_NFT_LOOKUPS").is_ok(),
+            env::var("IGNORE_OFF_CHAIN_TRANSACTIONS").is_ok(),
+        )
+        .unwrap();
+        println!(
+            "Wallet loaded! {} | {}",
+            wallet.count_blocks(),
+            wallet.on_chain_transactions.len()
+        );
+
+        let (block, transactions) = wallet.mining_data_from_off_chain_transactions().unwrap();
+
+        println!(
+            "Block {} created from {} transactions",
+            block.hash(),
+            transactions.len()
+        );
+
+        wallet
+            .add_on_chain_transactions(transactions, block.hash(), block.transactions_hash().hash())
+            .unwrap();
+
+        if wallet.off_chain_transactions.len() != 0 {
+            println!("ERROR: {} off chain transactions still in wallet after collecting all off chain transactions", wallet.off_chain_transactions.len());
+            return;
+        }
+
+        wallet.add_block(block).unwrap();
+        println!(
+            "Wallet loaded! {} | {}",
+            wallet.count_blocks(),
+            wallet.on_chain_transactions.len()
+        );
+        let binary_wallet = wallet.to_binary().unwrap();
+        let save = |filename: &str, data: Vec<u8>| {
+            File::create(format!("{}/{}", data_dir, filename))
+                .map(|mut f| f.write_all(&data).map_err(|e| e.to_string()))
+                .map_err(|e| e.to_string())
+        };
+        save("blockchain", binary_wallet.blockchain_bin)
+            .unwrap()
+            .unwrap();
+        save("pk", binary_wallet.pk_bin).unwrap().unwrap();
+        save("sk", binary_wallet.sk_bin).unwrap().unwrap();
+        save(
+            "on_chain_transactions",
+            binary_wallet.on_chain_transactions_bin,
+        )
+        .unwrap()
+        .unwrap();
+        save("unspent_outputs", binary_wallet.unspent_outputs_bin)
+            .unwrap()
+            .unwrap();
+        save("nft_lookups", binary_wallet.nft_lookups_bin)
+            .unwrap()
+            .unwrap();
+        save(
+            "off_chain_transactions",
+            binary_wallet.off_chain_transactions_bin,
+        )
+        .unwrap()
+        .unwrap();
     } else if let Some(matches) = matches.subcommand_matches("piximg") {
         let off_chain_transactions_file = matches.value_of("FILE").unwrap();
         let output = matches.value_of("DIRECTORY").unwrap();
@@ -786,5 +936,136 @@ fn main() {
         }
         pb.finish();
         // ffmpeg -r 120 -i video/%10d.png -c:v libx265 canvas.mp4
-    };
+    } else if let Some(_) = matches.subcommand_matches("doit") {
+        let mut client = ClientBuilder::new("wss://api.celestium.space")
+            .unwrap()
+            .connect(None)
+            .unwrap();
+        let thread_pool = ThreadPoolBuilder::new()
+            .num_threads(wallet::DEFAULT_N_THREADS as usize)
+            .build()
+            .unwrap();
+        let pk_bin =
+            hex::decode("02cd09eaabf7cbee6f286265e31cafd88342d2446264f57b9033a29f289513b1e6")
+                .unwrap();
+        let pk = *PublicKey::from_serialized(&pk_bin, &mut 0).unwrap();
+
+        let mut file = File::open("pixels.json").unwrap();
+        let mut data = String::new();
+        file.read_to_string(&mut data).unwrap();
+
+        let mut json: Data = serde_json::from_str(&data).unwrap();
+        json.data.shuffle(&mut thread_rng());
+
+        let pb = ProgressBar::with_message(ProgressBar::new(json.data.len() as u64), "Mining...");
+        pb.set_style(ProgressStyle::default_bar().template(wallet::DEFAULT_PROGRESSBAR_TEMPLATE));
+        for [x, y, c] in json.data {
+            let xh = (x >> 8) as u8;
+            let xl = (x & 0xff) as u8;
+            let yh = (y >> 8) as u8;
+            let yl = (y & 0xff) as u8;
+
+            let bin_message = vec![0x00, xh, xl, yh, yl];
+            let message = Message::binary(bin_message);
+            client.send_message(&message).unwrap();
+            let mut get_pixel_color_response = vec![];
+            loop {
+                client
+                    .recv_message()
+                    .unwrap()
+                    .write_payload(&mut get_pixel_color_response)
+                    .unwrap();
+                if get_pixel_color_response[0] == 0x01 {
+                    break;
+                } else {
+                    if let Ok(txt_response) = std::str::from_utf8(&get_pixel_color_response) {
+                        println!("ERR: {}", txt_response);
+                    }
+                    get_pixel_color_response = vec![];
+                }
+            }
+            if get_pixel_color_response[1] == c as u8 {
+                println!("({}, {}) already set to {}, skipping", x, y, c);
+                continue;
+            }
+
+            let mut bin_message = vec![0x07, xh, xl, yh, yl];
+            bin_message.extend(pk_bin.clone());
+            let message = Message::binary(bin_message);
+            client.send_message(&message).unwrap();
+            let mut response = vec![];
+            loop {
+                client
+                    .recv_message()
+                    .unwrap()
+                    .write_payload(&mut response)
+                    .unwrap();
+                if response[0] == 0x08 {
+                    break;
+                } else {
+                    if let Ok(txt_response) = std::str::from_utf8(&response) {
+                        println!("ERR: {}", txt_response);
+                    }
+                    response = vec![];
+                }
+            }
+            let mut i = 1; // Skipping opcode, checked above
+            let mut message = [0x0; 33];
+            message[0..28].copy_from_slice(&response[i..i + 28]);
+            message[28] = xh;
+            message[29] = xl;
+            message[30] = yh;
+            message[31] = yl;
+            message[32] = c as u8;
+
+            i += 28;
+            let block_head_hash =
+                *BlockHash::from_serialized(&response[i..i + 32], &mut 0).unwrap();
+            i += 32;
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&Sha3_256::digest(&message));
+            let pixel_transaction = Transaction::new_id_base_transaction(
+                block_head_hash,
+                message,
+                TransactionOutput::new(TransactionValue::new_id_transfer(hash).unwrap(), pk),
+            )
+            .unwrap();
+
+            let pixel_transaction = Wallet::mine_transaction(
+                wallet::DEFAULT_N_THREADS,
+                wallet::DEFAULT_PAR_WORK,
+                pixel_transaction,
+                &thread_pool,
+            )
+            .unwrap();
+
+            let katjing_transaction = *Transaction::from_serialized(&response, &mut i).unwrap();
+            let katjing_transaction = Wallet::mine_transaction(
+                wallet::DEFAULT_N_THREADS,
+                wallet::DEFAULT_PAR_WORK,
+                katjing_transaction,
+                &thread_pool,
+            )
+            .unwrap();
+
+            let mut bin_message = vec![
+                0u8;
+                1 + pixel_transaction.serialized_len()
+                    + katjing_transaction.serialized_len()
+            ];
+            bin_message[0] = 0x6;
+            let mut i = 1;
+            pixel_transaction
+                .serialize_into(&mut bin_message, &mut i)
+                .unwrap();
+            katjing_transaction
+                .serialize_into(&mut bin_message, &mut i)
+                .unwrap();
+            let message = Message::binary(bin_message);
+            client.send_message(&message).unwrap();
+
+            pb.inc(1);
+        }
+        pb.finish();
+    }
 }
